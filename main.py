@@ -27,11 +27,16 @@ async def main() -> None:
     dp.include_router(registration.router)
     dp.include_router(companion.router)
 
-    # фоновый опрос Minecraft-сервера
-    asyncio.create_task(run_poller(bot))
+    # фоновый опрос Minecraft-сервера.
+    # Ссылку на задачу обязательно держим: иначе сборщик мусора
+    # уничтожит её прямо во время работы ("Task was destroyed but it is pending").
+    poller_task = asyncio.create_task(run_poller(bot))
 
     logging.info("Бот запущен")
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    finally:
+        poller_task.cancel()
 
 
 if __name__ == "__main__":

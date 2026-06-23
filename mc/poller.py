@@ -22,17 +22,21 @@ async def run_poller(bot: Bot) -> None:
         known_online = initial
         log.info("Старт: на сервере %d игрок(ов)", len(known_online))
 
-    while True:
-        await asyncio.sleep(config.poll_interval)
-        now = await online_players_safe()
-        if now is None:
-            continue
-        for nick in now - known_online:
-            try:
-                await handle_join(bot, nick)
-            except Exception as e:
-                log.exception("Не удалось обработать заход %s: %s", nick, e)
-        known_online = now
+    try:
+        while True:
+            await asyncio.sleep(config.poll_interval)
+            now = await online_players_safe()
+            if now is None:
+                continue
+            for nick in now - known_online:
+                try:
+                    await handle_join(bot, nick)
+                except Exception as e:
+                    log.exception("Не удалось обработать заход %s: %s", nick, e)
+            known_online = now
+    except asyncio.CancelledError:
+        log.info("Поллер остановлен")
+        raise
 
 
 async def online_players_safe() -> set[str] | None:
