@@ -7,6 +7,7 @@ from aiogram.types import Message
 
 from config import config
 from game.daily import process_day
+from utils.cleanup import delete_later
 
 router = Router()
 
@@ -21,6 +22,7 @@ async def recalc(msg: Message, command: CommandObject, bot: Bot):
     """
     if msg.from_user.id != config.admin_id:
         return
+    delete_later(msg.bot, msg.chat.id, msg.message_id)
     day = (command.args or "").strip() or datetime.now().date().isoformat()
     await msg.answer(f"⏳ Пересчёт опыта за <b>{day}</b>…")
     try:
@@ -28,4 +30,5 @@ async def recalc(msg: Message, command: CommandObject, bot: Bot):
     except Exception as e:
         await msg.answer(f"⚠️ Ошибка: <code>{e}</code>")
         return
-    await msg.answer("✅ Готово — отчёты разосланы игрокам.")
+    sent = await msg.answer("✅ Готово — отчёты разосланы игрокам.")
+    delete_later(msg.bot, sent.chat.id, sent.message_id)

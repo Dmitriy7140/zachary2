@@ -25,7 +25,6 @@ def main_menu() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="🎒 Инвентарь", callback_data="menu:inventory")],
             [InlineKeyboardButton(text="🛒 Магазин", callback_data="menu:shop")],
             [InlineKeyboardButton(text="😈 Пакости", callback_data="menu:pranks")],
-            [InlineKeyboardButton(text="💰 Баланс", callback_data="menu:balance")],
         ]
     )
 

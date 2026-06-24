@@ -8,7 +8,7 @@ from aiogram.enums import ParseMode
 from config import config
 from db import storage
 from game.daily import run_daily_scheduler
-from handlers import admin, companion, inventory, minigames, registration, shop
+from handlers import admin, companion, inventory, minigames, pranks, registration, shop
 from mc.poller import run_poller
 
 logging.basicConfig(
@@ -30,6 +30,7 @@ async def main() -> None:
     dp.include_router(minigames.router)
     dp.include_router(shop.router)
     dp.include_router(inventory.router)
+    dp.include_router(pranks.router)
     dp.include_router(companion.router)
 
     # фоновый опрос Minecraft-сервера.

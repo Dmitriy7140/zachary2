@@ -10,8 +10,16 @@ from db import storage
 from game.leveling import xp_for_level
 from keyboards import main_menu
 from mc.rcon import online_players
+from utils.cleanup import delete_later
 
 router = Router()
+
+
+async def _temp(msg: Message, text: str, **kw) -> None:
+    """Ответить и через минуту удалить и ответ, и саму команду."""
+    sent = await msg.answer(text, **kw)
+    delete_later(msg.bot, msg.chat.id, msg.message_id)
+    delete_later(msg.bot, sent.chat.id, sent.message_id)
 
 
 def _profile_card(profile: tuple) -> str:
@@ -32,22 +40,21 @@ async def online(msg: Message):
     """Живой тест RCON: показать, кто сейчас на сервере."""
     try:
         players = await online_players()
+        if not players:
+            text = "🌙 На сервере сейчас никого."
+        else:
+            lst = "\n".join(f"• {p}" for p in players)
+            text = f"🎮 Онлайн ({len(players)}):\n{lst}"
     except asyncio.TimeoutError:
-        await msg.answer("⌛ Сервер не ответил (RCON-таймаут). Порт открыт, но обмен завис — проверь пароль/бинд.")
-        return
+        text = "⌛ Сервер не ответил (RCON-таймаут)."
     except Exception as e:
-        await msg.answer(f"⚠️ Не удалось связаться с сервером:\n<code>{e}</code>")
-        return
-
-    if not players:
-        await msg.answer("🌙 На сервере сейчас никого.")
-    else:
-        lst = "\n".join(f"• {p}" for p in players)
-        await msg.answer(f"🎮 Онлайн ({len(players)}):\n{lst}")
+        text = f"⚠️ Не удалось связаться с сервером:\n<code>{e}</code>"
+    await _temp(msg, text)
 
 
 @router.message(CommandStart())
 async def start(msg: Message):
+    delete_later(msg.bot, msg.chat.id, msg.message_id)  # убрать саму /start
     profile = await storage.get_profile(msg.from_user.id)
     if not profile:
         await msg.answer(
@@ -58,14 +65,6 @@ async def start(msg: Message):
     await msg.answer(_profile_card(profile), reply_markup=main_menu())
 
 
-@router.message(Command("balance"))
-async def balance(msg: Message):
-    profile = await storage.get_profile(msg.from_user.id)
-    if not profile:
-        return await msg.answer("Сначала зарегистрируйся 😉")
-    await msg.answer(f"💰 Баланс: <b>{profile[3]} Z</b>")
-
-
 @router.callback_query(F.data == "menu:main")
 async def cb_main(cb: CallbackQuery):
     profile = await storage.get_profile(cb.from_user.id)
@@ -73,15 +72,3 @@ async def cb_main(cb: CallbackQuery):
         return await cb.answer("Сначала зарегистрируйся 😉", show_alert=True)
     await cb.message.edit_text(_profile_card(profile), reply_markup=main_menu())
     await cb.answer()
-
-
-@router.callback_query(F.data == "menu:balance")
-async def cb_balance(cb: CallbackQuery):
-    profile = await storage.get_profile(cb.from_user.id)
-    bal = profile[3] if profile else 0
-    await cb.answer(f"💰 {bal} Z", show_alert=True)
-
-
-@router.callback_query(F.data == "menu:pranks")
-async def cb_stub(cb: CallbackQuery):
-    await cb.answer("🚧 Раздел в разработке", show_alert=True)
