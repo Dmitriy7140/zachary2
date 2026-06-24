@@ -3,6 +3,7 @@ import asyncio
 import logging
 
 from aiogram import Bot
+from aiogram.utils.markdown import hlink
 
 from config import config
 from content.greetings import random_greeting, first_time_greeting, random_farewell
@@ -66,13 +67,23 @@ async def _post(bot: Bot, text: str, kb=None) -> None:
     )
 
 
+async def _nick_display(nick: str) -> str:
+    """Ник со ссылкой на TG-профиль, если игрок зарегистрирован."""
+    tg_id = await storage.get_tg_id_by_nick(nick)
+    if tg_id:
+        return hlink(nick, f"tg://user?id={tg_id}")
+    return nick
+
+
 async def handle_join(bot: Bot, nick: str) -> None:
     is_new = await storage.register_seen(nick)
+    display = await _nick_display(nick)
     if is_new:
-        await _post(bot, first_time_greeting(nick), register_kb(nick))
+        # Новичок ещё не зарегистрирован — кнопка регистрации по сырому нику.
+        await _post(bot, first_time_greeting(display), register_kb(nick))
     else:
-        await _post(bot, random_greeting(nick))
+        await _post(bot, random_greeting(display))
 
 
 async def handle_leave(bot: Bot, nick: str) -> None:
-    await _post(bot, random_farewell(nick))
+    await _post(bot, random_farewell(await _nick_display(nick)))

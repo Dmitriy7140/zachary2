@@ -64,6 +64,13 @@ async def get_profile(tg_id: int) -> tuple | None:
     return await cur.fetchone()
 
 
+async def get_tg_id_by_nick(nick: str) -> int | None:
+    """tg_id зарегистрированного игрока по майнкрафт-нику, иначе None."""
+    cur = await _db.execute("SELECT tg_id FROM profiles WHERE nick = ?", (nick,))
+    row = await cur.fetchone()
+    return row[0] if row else None
+
+
 async def add_zbucks(tg_id: int, amount: int) -> None:
     await _db.execute(
         "UPDATE profiles SET zbucks = zbucks + ? WHERE tg_id = ?", (amount, tg_id)
