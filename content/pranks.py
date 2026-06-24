@@ -129,7 +129,7 @@ PRANKS: dict[str, Prank] = {
     "zahar_raid": Prank(
         "zahar_raid", "Налет Захаров", 200, "summon",
         entity="minecraft:pillager", nbt=RAID_NBT, count=15,
-        weapons=("minecraft:iron_sword", "minecraft:crossbow"),
+        weapons=("minecraft:crossbow",),
         messages=(
             "{buyer} натравил на {victim} налёт Захаров — 15 Злых Захаров с арбалетами уже бегут стрелять 🏹",
             "Тревога! 15 Злых Захаров высадились у {victim}. Спасибо {buyer}, теперь беги.",
