@@ -1,4 +1,6 @@
 """Хранилище: игроки (для детекта новичков) и профили ZakharCompanion."""
+from datetime import datetime
+
 import aiosqlite
 
 from config import config
@@ -24,9 +26,27 @@ async def init() -> None:
             zbucks     INTEGER DEFAULT 0,
             created_at TEXT DEFAULT (datetime('now'))
         );
+
+        -- наигранное время за день (только зарегистрированные)
+        CREATE TABLE IF NOT EXISTS playtime (
+            nick    TEXT,
+            day     TEXT,
+            seconds INTEGER DEFAULT 0,
+            PRIMARY KEY (nick, day)
+        );
         """
     )
+    # миграции для уже существующей БД
+    await _ensure_column("profiles", "xp", "INTEGER DEFAULT 0")
+    await _ensure_column("profiles", "level", "INTEGER DEFAULT 0")
     await _db.commit()
+
+
+async def _ensure_column(table: str, column: str, decl: str) -> None:
+    cur = await _db.execute(f"PRAGMA table_info({table})")
+    existing = {row[1] for row in await cur.fetchall()}
+    if column not in existing:
+        await _db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
 
 async def register_seen(nick: str) -> bool:
@@ -57,9 +77,10 @@ async def create_profile(tg_id: int, username: str | None, nick: str) -> bool:
 
 
 async def get_profile(tg_id: int) -> tuple | None:
-    """Вернуть (tg_id, username, nick, zbucks) или None."""
+    """Вернуть (tg_id, username, nick, zbucks, xp, level) или None."""
     cur = await _db.execute(
-        "SELECT tg_id, username, nick, zbucks FROM profiles WHERE tg_id = ?", (tg_id,)
+        "SELECT tg_id, username, nick, zbucks, xp, level FROM profiles WHERE tg_id = ?",
+        (tg_id,),
     )
     return await cur.fetchone()
 
@@ -71,8 +92,66 @@ async def get_tg_id_by_nick(nick: str) -> int | None:
     return row[0] if row else None
 
 
+async def get_profile_by_nick(nick: str) -> tuple | None:
+    """(tg_id, level) зарегистрированного игрока по нику, иначе None."""
+    cur = await _db.execute(
+        "SELECT tg_id, level FROM profiles WHERE nick = ?", (nick,)
+    )
+    return await cur.fetchone()
+
+
 async def add_zbucks(tg_id: int, amount: int) -> None:
     await _db.execute(
         "UPDATE profiles SET zbucks = zbucks + ? WHERE tg_id = ?", (amount, tg_id)
     )
+    await _db.commit()
+
+
+# --- наигранное время и опыт ---
+
+async def add_playtime(nicks: set[str], seconds: int) -> None:
+    """Прибавить `seconds` к сегодняшнему счётчику для онлайн-ников.
+
+    Учитываются только зарегистрированные (EXISTS в profiles).
+    """
+    if not nicks:
+        return
+    day = datetime.now().date().isoformat()
+    for nick in nicks:
+        await _db.execute(
+            """
+            INSERT INTO playtime (nick, day, seconds)
+            SELECT ?, ?, ? WHERE EXISTS (SELECT 1 FROM profiles WHERE nick = ?)
+            ON CONFLICT (nick, day) DO UPDATE SET seconds = seconds + excluded.seconds
+            """,
+            (nick, day, seconds, nick),
+        )
+    await _db.commit()
+
+
+async def get_day_playtime(day: str) -> dict[str, int]:
+    """{nick: seconds} за указанный день."""
+    cur = await _db.execute(
+        "SELECT nick, seconds FROM playtime WHERE day = ?", (day,)
+    )
+    return {row[0]: row[1] for row in await cur.fetchall()}
+
+
+async def all_profiles() -> list[tuple]:
+    """Список (tg_id, nick, xp, level) всех профилей."""
+    cur = await _db.execute("SELECT tg_id, nick, xp, level FROM profiles")
+    return await cur.fetchall()
+
+
+async def apply_daily_xp(tg_id: int, xp: int, level: int, zbucks_gain: int) -> None:
+    await _db.execute(
+        "UPDATE profiles SET xp = ?, level = ?, zbucks = zbucks + ? WHERE tg_id = ?",
+        (xp, level, zbucks_gain, tg_id),
+    )
+    await _db.commit()
+
+
+async def clear_playtime(until_day: str) -> None:
+    """Удалить накопленное время по день `until_day` включительно."""
+    await _db.execute("DELETE FROM playtime WHERE day <= ?", (until_day,))
     await _db.commit()

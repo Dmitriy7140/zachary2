@@ -7,7 +7,8 @@ from aiogram.enums import ParseMode
 
 from config import config
 from db import storage
-from handlers import companion, registration
+from game.daily import run_daily_scheduler
+from handlers import admin, companion, registration
 from mc.poller import run_poller
 
 logging.basicConfig(
@@ -24,6 +25,7 @@ async def main() -> None:
 
     bot = Bot(config.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
+    dp.include_router(admin.router)
     dp.include_router(registration.router)
     dp.include_router(companion.router)
 
@@ -31,12 +33,14 @@ async def main() -> None:
     # Ссылку на задачу обязательно держим: иначе сборщик мусора
     # уничтожит её прямо во время работы ("Task was destroyed but it is pending").
     poller_task = asyncio.create_task(run_poller(bot))
+    daily_task = asyncio.create_task(run_daily_scheduler(bot))
 
     logging.info("Бот запущен")
     try:
         await dp.start_polling(bot)
     finally:
         poller_task.cancel()
+        daily_task.cancel()
 
 
 if __name__ == "__main__":

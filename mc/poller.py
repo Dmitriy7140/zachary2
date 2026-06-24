@@ -7,6 +7,7 @@ from aiogram.utils.markdown import hlink
 
 from config import config
 from content.greetings import random_greeting, first_time_greeting, random_farewell
+from content.ranks import rank
 from db import storage
 from keyboards import register_kb
 
@@ -29,6 +30,8 @@ async def run_poller(bot: Bot) -> None:
             now = await online_players_safe()
             if now is None:
                 continue
+            # Копим наигранное время за интервал (только зарегистрированные).
+            await storage.add_playtime(now, config.poll_interval)
             # Множества сами разруливают «зашло/вышло сразу несколько».
             for nick in now - known_online:
                 try:
@@ -68,11 +71,14 @@ async def _post(bot: Bot, text: str, kb=None) -> None:
 
 
 async def _nick_display(nick: str) -> str:
-    """Ник со ссылкой на TG-профиль, если игрок зарегистрирован."""
-    tg_id = await storage.get_tg_id_by_nick(nick)
-    if tg_id:
-        return hlink(nick, f"tg://user?id={tg_id}")
-    return nick
+    """Звание + ник (ник — ссылка на TG-профиль, если зарегистрирован)."""
+    profile = await storage.get_profile_by_nick(nick)
+    if profile:
+        tg_id, level = profile
+        name = hlink(nick, f"tg://user?id={tg_id}")
+    else:
+        level, name = 0, nick  # незарегистрированный — Новичок без ссылки
+    return f"{rank(level)} {name}"
 
 
 async def handle_join(bot: Bot, nick: str) -> None:

@@ -28,5 +28,12 @@ class Config:
     poll_interval: int = _int("POLL_INTERVAL", 20)
     db_path: str = os.getenv("DB_PATH", "zachary.db")
 
+    # Опыт / уровни
+    xp_daily_quota: int = _int("XP_DAILY_QUOTA", 1000)       # базовая квота опыта в день
+    xp_min: int = _int("XP_MIN", 200)                        # пол: меньше за день не дадут
+    xp_noplay_multiplier: int = _int("XP_NOPLAY_MULT", 2)    # ×N, если не заходил совсем
+    xp_decay_per_minute: int = _int("XP_DECAY_PER_MINUTE", 5)  # сколько отнимать за минуту игры
+    xp_level_step: int = _int("XP_LEVEL_STEP", 1000)         # уровень N стоит N×step опыта
+
 
 config = Config()

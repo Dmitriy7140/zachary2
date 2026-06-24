@@ -5,11 +5,26 @@ from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, Message
 
+from content.ranks import rank
 from db import storage
+from game.leveling import xp_for_level
 from keyboards import main_menu
 from mc.rcon import online_players
 
 router = Router()
+
+
+def _profile_card(profile: tuple) -> str:
+    """Карточка профиля: ник, звание, прогресс опыта, баланс."""
+    _, _, nick, zbucks, xp, level = profile
+    here = xp - xp_for_level(level)              # опыт внутри текущего уровня
+    need = xp_for_level(level + 1) - xp_for_level(level)  # цена следующего уровня
+    return (
+        f"👤 <b>{nick}</b>\n"
+        f"⭐ Уровень <b>{level}</b> — {rank(level)}\n"
+        f"✨ Опыт: {here} / {need} (до уровня {level + 1})\n"
+        f"💰 Баланс: <b>{zbucks} Z</b>"
+    )
 
 
 @router.message(Command("online"))
@@ -40,10 +55,15 @@ async def start(msg: Message):
             "Зайди на сервер и зарегистрируйся через приветствие в канале 😉"
         )
         return
-    await msg.answer(
-        f"С возвращением, <b>{profile[2]}</b>!\nБаланс: <b>{profile[3]} Z</b>",
-        reply_markup=main_menu(),
-    )
+    await msg.answer(_profile_card(profile), reply_markup=main_menu())
+
+
+@router.message(Command("profile"))
+async def profile_cmd(msg: Message):
+    profile = await storage.get_profile(msg.from_user.id)
+    if not profile:
+        return await msg.answer("Сначала зарегистрируйся 😉")
+    await msg.answer(_profile_card(profile), reply_markup=main_menu())
 
 
 @router.message(Command("balance"))
