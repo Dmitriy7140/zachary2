@@ -5,12 +5,15 @@ from aiogram.types import CallbackQuery
 from db import storage
 from game.items import ITEMS
 from keyboards import back_menu
+from utils.guards import ensure_owner
 
 router = Router()
 
 
-@router.callback_query(F.data == "menu:inventory")
+@router.callback_query(F.data.startswith("menu:inventory:"))
 async def inventory(cb: CallbackQuery):
+    if not await ensure_owner(cb):
+        return
     if not await storage.get_profile(cb.from_user.id):
         return await cb.answer("Сначала зарегистрируйся 😉", show_alert=True)
 
@@ -26,5 +29,5 @@ async def inventory(cb: CallbackQuery):
             lines.append(f"{it.emoji} {it.name}")
 
     body = "\n".join(lines) if lines else "пусто 🕸"
-    await cb.message.edit_text(f"🎒 <b>Инвентарь</b>\n\n{body}", reply_markup=back_menu())
+    await cb.message.edit_text(f"🎒 <b>Инвентарь</b>\n\n{body}", reply_markup=back_menu(cb.from_user.id))
     await cb.answer()

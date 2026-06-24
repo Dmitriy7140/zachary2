@@ -18,18 +18,19 @@ def approve_kb(tg_id: int, nick: str) -> InlineKeyboardMarkup:
     )
 
 
-def main_menu() -> InlineKeyboardMarkup:
+def main_menu(owner: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🎲 Мини-игры", callback_data="menu:games")],
-            [InlineKeyboardButton(text="🎒 Инвентарь", callback_data="menu:inventory")],
-            [InlineKeyboardButton(text="🛒 Магазин", callback_data="menu:shop")],
+            [InlineKeyboardButton(text="🎲 Мини-игры", callback_data=f"menu:games:{owner}")],
+            [InlineKeyboardButton(text="🎒 Инвентарь", callback_data=f"menu:inventory:{owner}")],
+            [InlineKeyboardButton(text="🛒 Магазин", callback_data=f"menu:shop:{owner}")],
+            # Пакости — без owner: они только в личке (ensure_private)
             [InlineKeyboardButton(text="😈 Пакости", callback_data="menu:pranks")],
         ]
     )
 
 
-def back_menu() -> InlineKeyboardMarkup:
+def back_menu(owner: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="⬅️ В меню", callback_data="menu:main")]]
+        inline_keyboard=[[InlineKeyboardButton(text="⬅️ В меню", callback_data=f"menu:main:{owner}")]]
     )

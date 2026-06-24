@@ -11,6 +11,7 @@ from game.leveling import xp_for_level
 from keyboards import main_menu
 from mc.rcon import online_players
 from utils.cleanup import delete_later
+from utils.guards import ensure_owner
 
 router = Router()
 
@@ -62,13 +63,15 @@ async def start(msg: Message):
             "Зайди на сервер и зарегистрируйся через приветствие в канале 😉"
         )
         return
-    await msg.answer(_profile_card(profile), reply_markup=main_menu())
+    await msg.answer(_profile_card(profile), reply_markup=main_menu(msg.from_user.id))
 
 
-@router.callback_query(F.data == "menu:main")
+@router.callback_query(F.data.startswith("menu:main:"))
 async def cb_main(cb: CallbackQuery):
+    if not await ensure_owner(cb):
+        return
     profile = await storage.get_profile(cb.from_user.id)
     if not profile:
         return await cb.answer("Сначала зарегистрируйся 😉", show_alert=True)
-    await cb.message.edit_text(_profile_card(profile), reply_markup=main_menu())
+    await cb.message.edit_text(_profile_card(profile), reply_markup=main_menu(cb.from_user.id))
     await cb.answer()

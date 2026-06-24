@@ -9,7 +9,7 @@ from content import goat
 from db import storage
 from game.items import ITEMS
 from keyboards import back_menu
-from utils.guards import ensure_private
+from utils.guards import ensure_owner, with_owner
 
 router = Router()
 
@@ -21,26 +21,27 @@ def _kb(rows) -> InlineKeyboardMarkup:
 
 
 # --- меню мини-игр ---
-@router.callback_query(F.data == "menu:games")
+@router.callback_query(F.data.startswith("menu:games:"))
 async def games_menu(cb: CallbackQuery):
-    if not await ensure_private(cb):
+    if not await ensure_owner(cb):
         return
-    if not await storage.get_profile(cb.from_user.id):
+    owner = cb.from_user.id
+    if not await storage.get_profile(owner):
         return await cb.answer("Сначала зарегистрируйся 😉", show_alert=True)
     rows = [
-        [InlineKeyboardButton(text="🐐 Подоить козу", callback_data="goat:start")],
-        [InlineKeyboardButton(text="⬅️ В меню", callback_data="menu:main")],
+        [InlineKeyboardButton(text="🐐 Подоить козу", callback_data=with_owner("goat:start", owner))],
+        [InlineKeyboardButton(text="⬅️ В меню", callback_data=with_owner("menu:main", owner))],
     ]
     await cb.message.edit_text("🎲 <b>Мини-игры</b>\nВыбери забаву:", reply_markup=_kb(rows))
     await cb.answer()
 
 
 # --- Дойка козы: старт ---
-@router.callback_query(F.data == "goat:start")
+@router.callback_query(F.data.startswith("goat:start:"))
 async def goat_start(cb: CallbackQuery):
-    if not await ensure_private(cb):
+    if not await ensure_owner(cb):
         return
-    tg_id = cb.from_user.id
+    owner = tg_id = cb.from_user.id
     if not await storage.get_profile(tg_id):
         return await cb.answer("Сначала зарегистрируйся 😉", show_alert=True)
 
@@ -54,8 +55,8 @@ async def goat_start(cb: CallbackQuery):
 
     await storage.set_cooldown(tg_id, "goat")
     rows = [[
-        InlineKeyboardButton(text="👈 Левая", callback_data="goat:r1:left"),
-        InlineKeyboardButton(text="Правая 👉", callback_data="goat:r1:right"),
+        InlineKeyboardButton(text="👈 Левая", callback_data=with_owner("goat:r1:left", owner)),
+        InlineKeyboardButton(text="Правая 👉", callback_data=with_owner("goat:r1:right", owner)),
     ]]
     await cb.message.edit_text(
         "🐐 Перед вами коза. С какой титьки начнём?", reply_markup=_kb(rows)
@@ -66,17 +67,18 @@ async def goat_start(cb: CallbackQuery):
 # --- Раунд 1: выбор титьки ---
 @router.callback_query(F.data.startswith("goat:r1:"))
 async def goat_round1(cb: CallbackQuery):
-    if not await ensure_private(cb):
+    if not await ensure_owner(cb):
         return
-    tg_id = cb.from_user.id
+    owner = tg_id = cb.from_user.id
     await storage.add_zbucks(tg_id, 20)
 
     if random.random() < 0.5:  # неверная титька — игра заканчивается
-        await cb.message.edit_text(f"{goat.pasha()}\n\n💰 +20 Z", reply_markup=back_menu())
+        await cb.message.edit_text(f"{goat.pasha()}\n\n💰 +20 Z", reply_markup=back_menu(owner))
         return await cb.answer()
 
     # верная титька — раунд 2
-    rows = [[InlineKeyboardButton(text=goat.OPTION_LABELS[o], callback_data=f"goat:r2:{o}")]
+    rows = [[InlineKeyboardButton(text=goat.OPTION_LABELS[o],
+                                  callback_data=with_owner(f"goat:r2:{o}", owner))]
             for o in ("1", "2", "3")]
     await cb.message.edit_text(f"💰 +20 Z\n\n{goat.ROUND2_INTRO}", reply_markup=_kb(rows))
     await cb.answer()
@@ -85,22 +87,22 @@ async def goat_round1(cb: CallbackQuery):
 # --- Раунд 2 (+ авто-раунд 3) ---
 @router.callback_query(F.data.startswith("goat:r2:"))
 async def goat_round2(cb: CallbackQuery):
-    if not await ensure_private(cb):
+    if not await ensure_owner(cb):
         return
-    tg_id = cb.from_user.id
+    owner = tg_id = cb.from_user.id
     opt = cb.data.split(":")[2]
 
     if random.random() >= goat.SUCCESS_CHANCE.get(opt, 0):
         # провал — игра заканчивается, третьего раунда нет
         await storage.add_zbucks(tg_id, 10)
-        await cb.message.edit_text(f"{goat.FAIL[opt]}\n\n💰 +10 Z", reply_markup=back_menu())
+        await cb.message.edit_text(f"{goat.FAIL[opt]}\n\n💰 +10 Z", reply_markup=back_menu(owner))
         return await cb.answer()
 
     # успех — +50 и только теперь раунд 3
     await storage.add_zbucks(tg_id, 50)
     round3 = await _round3(tg_id)
     await cb.message.edit_text(
-        f"{goat.success(opt)}\n\n💰 +50 Z\n\n———\n{round3}", reply_markup=back_menu()
+        f"{goat.success(opt)}\n\n💰 +50 Z\n\n———\n{round3}", reply_markup=back_menu(owner)
     )
     await cb.answer()
 

@@ -13,7 +13,7 @@ from db import storage
 from keyboards import back_menu
 from mc.rcon import online_players, rcon
 from utils.cleanup import delete_later
-from utils.guards import ensure_private
+from utils.guards import ensure_private, with_owner
 
 log = logging.getLogger(__name__)
 router = Router()
@@ -29,12 +29,12 @@ def _kb(rows) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-async def _render_menu(message) -> None:
+async def _render_menu(message, owner: int) -> None:
     rows = [
         [InlineKeyboardButton(text=f"{p.name} — {p.price} Z", callback_data=f"prank:{p.key}")]
         for p in PRANKS.values()
     ]
-    rows.append([InlineKeyboardButton(text="⬅️ В меню", callback_data="menu:main")])
+    rows.append([InlineKeyboardButton(text="⬅️ В меню", callback_data=with_owner("menu:main", owner))])
     await message.edit_text("😈 <b>Пакости</b>\nВыбери, что устроить:", reply_markup=_kb(rows))
 
 
@@ -44,7 +44,7 @@ async def pranks_menu(cb: CallbackQuery):
         return
     if not await storage.get_profile(cb.from_user.id):
         return await cb.answer("Сначала зарегистрируйся 😉", show_alert=True)
-    await _render_menu(cb.message)
+    await _render_menu(cb.message, cb.from_user.id)
     await cb.answer()
 
 
@@ -106,7 +106,7 @@ async def _execute(cb: CallbackQuery, bot: Bot, prank, nick: str) -> None:
     buyer = _buyer(tg_id, cb.from_user.full_name)
     await _announce(bot, prank_message(prank, victim, buyer))
     await cb.answer(f"✅ {prank.name} → {nick}", show_alert=True)
-    await _render_menu(cb.message)
+    await _render_menu(cb.message, tg_id)
 
 
 # --- «Написать письмо»: ввод текста самим заказчиком ---
@@ -162,7 +162,7 @@ async def letter_text(msg: Message, state: FSMContext, bot: Bot):
     try:
         await bot.edit_message_text(
             "✉️ Письмо отправлено!", chat_id=data["chat_id"], message_id=data["msg_id"],
-            reply_markup=back_menu(),
+            reply_markup=back_menu(tg_id),
         )
     except Exception:
         pass

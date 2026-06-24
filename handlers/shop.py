@@ -4,32 +4,32 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 
 from db import storage
 from game.items import ITEMS, shop_items
-from utils.guards import ensure_private
+from utils.guards import ensure_owner, with_owner
 
 router = Router()
 
 
-async def _render(message, tg_id: int) -> None:
-    profile = await storage.get_profile(tg_id)
+async def _render(message, owner: int) -> None:
+    profile = await storage.get_profile(owner)
     rows = []
     for it in shop_items():
-        owned = await storage.get_item_qty(tg_id, it.key)
+        owned = await storage.get_item_qty(owner, it.key)
         if owned >= it.max_qty:
             rows.append([InlineKeyboardButton(text=f"{it.emoji} {it.name} — куплено ✅",
                                               callback_data="noop")])
         else:
             rows.append([InlineKeyboardButton(text=f"{it.emoji} {it.name} — {it.price} Z",
-                                              callback_data=f"shop:buy:{it.key}")])
-    rows.append([InlineKeyboardButton(text="⬅️ В меню", callback_data="menu:main")])
+                                              callback_data=with_owner(f"shop:buy:{it.key}", owner))])
+    rows.append([InlineKeyboardButton(text="⬅️ В меню", callback_data=with_owner("menu:main", owner))])
     await message.edit_text(
         f"🛒 <b>Магазин</b>\nБаланс: <b>{profile[3]} Z</b>",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
     )
 
 
-@router.callback_query(F.data == "menu:shop")
+@router.callback_query(F.data.startswith("menu:shop:"))
 async def shop_menu(cb: CallbackQuery):
-    if not await ensure_private(cb):
+    if not await ensure_owner(cb):
         return
     if not await storage.get_profile(cb.from_user.id):
         return await cb.answer("Сначала зарегистрируйся 😉", show_alert=True)
@@ -44,7 +44,7 @@ async def noop(cb: CallbackQuery):
 
 @router.callback_query(F.data.startswith("shop:buy:"))
 async def shop_buy(cb: CallbackQuery):
-    if not await ensure_private(cb):
+    if not await ensure_owner(cb):
         return
     tg_id = cb.from_user.id
     key = cb.data.split(":")[2]
