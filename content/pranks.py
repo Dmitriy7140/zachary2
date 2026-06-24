@@ -110,7 +110,8 @@ def prank_commands(p: Prank, nick: str) -> list[str]:
     if p.kind == "effect":
         return [f"effect give {nick} {p.effect} {EFFECT_DURATION} {p.amp}"]
     if p.kind == "sound":
-        return [f"playsound {p.sound} master {nick}"]
+        # execute at <ник> — звук в точке игрока, иначе он его не слышит
+        return [f"execute at {nick} run playsound {p.sound} master {nick} ~ ~ ~ 100 1 1"]
     if p.kind == "title":
         phrase = random.choice(TITLE_PHRASES)
         return [

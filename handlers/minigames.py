@@ -9,6 +9,7 @@ from content import goat
 from db import storage
 from game.items import ITEMS
 from keyboards import back_menu
+from utils.guards import ensure_private
 
 router = Router()
 
@@ -22,6 +23,8 @@ def _kb(rows) -> InlineKeyboardMarkup:
 # --- меню мини-игр ---
 @router.callback_query(F.data == "menu:games")
 async def games_menu(cb: CallbackQuery):
+    if not await ensure_private(cb):
+        return
     if not await storage.get_profile(cb.from_user.id):
         return await cb.answer("Сначала зарегистрируйся 😉", show_alert=True)
     rows = [
@@ -35,6 +38,8 @@ async def games_menu(cb: CallbackQuery):
 # --- Дойка козы: старт ---
 @router.callback_query(F.data == "goat:start")
 async def goat_start(cb: CallbackQuery):
+    if not await ensure_private(cb):
+        return
     tg_id = cb.from_user.id
     if not await storage.get_profile(tg_id):
         return await cb.answer("Сначала зарегистрируйся 😉", show_alert=True)
@@ -61,6 +66,8 @@ async def goat_start(cb: CallbackQuery):
 # --- Раунд 1: выбор титьки ---
 @router.callback_query(F.data.startswith("goat:r1:"))
 async def goat_round1(cb: CallbackQuery):
+    if not await ensure_private(cb):
+        return
     tg_id = cb.from_user.id
     await storage.add_zbucks(tg_id, 20)
 
@@ -78,6 +85,8 @@ async def goat_round1(cb: CallbackQuery):
 # --- Раунд 2 (+ авто-раунд 3) ---
 @router.callback_query(F.data.startswith("goat:r2:"))
 async def goat_round2(cb: CallbackQuery):
+    if not await ensure_private(cb):
+        return
     tg_id = cb.from_user.id
     opt = cb.data.split(":")[2]
 

@@ -4,6 +4,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 
 from db import storage
 from game.items import ITEMS, shop_items
+from utils.guards import ensure_private
 
 router = Router()
 
@@ -28,6 +29,8 @@ async def _render(message, tg_id: int) -> None:
 
 @router.callback_query(F.data == "menu:shop")
 async def shop_menu(cb: CallbackQuery):
+    if not await ensure_private(cb):
+        return
     if not await storage.get_profile(cb.from_user.id):
         return await cb.answer("Сначала зарегистрируйся 😉", show_alert=True)
     await _render(cb.message, cb.from_user.id)
@@ -41,6 +44,8 @@ async def noop(cb: CallbackQuery):
 
 @router.callback_query(F.data.startswith("shop:buy:"))
 async def shop_buy(cb: CallbackQuery):
+    if not await ensure_private(cb):
+        return
     tg_id = cb.from_user.id
     key = cb.data.split(":")[2]
     item = ITEMS.get(key)
