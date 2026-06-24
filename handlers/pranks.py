@@ -8,7 +8,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from aiogram.utils.markdown import hlink
 
 from config import config
-from content.pranks import PRANKS, prank_commands, prank_message
+from content.pranks import PRANK_EMOJI, PRANKS, prank_commands, prank_message
 from db import storage
 from keyboards import back_menu
 from mc.rcon import online_players, rcon
@@ -19,6 +19,7 @@ log = logging.getLogger(__name__)
 router = Router()
 
 LETTER_MAXLEN = 100
+PAGE_SIZE = 5
 
 
 class LetterStates(StatesGroup):
@@ -29,11 +30,26 @@ def _kb(rows) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-async def _render_menu(message, owner: int) -> None:
+async def _render_menu(message, owner: int, page: int = 0) -> None:
+    items = list(PRANKS.values())
+    pages = max(1, (len(items) + PAGE_SIZE - 1) // PAGE_SIZE)
+    page = max(0, min(page, pages - 1))
+    chunk = items[page * PAGE_SIZE:(page + 1) * PAGE_SIZE]
+
     rows = [
-        [InlineKeyboardButton(text=f"{p.name} — {p.price} Z", callback_data=f"prank:{p.key}")]
-        for p in PRANKS.values()
+        [InlineKeyboardButton(
+            text=f"{PRANK_EMOJI.get(p.key, '😈')} {p.name} — {p.price} Z",
+            callback_data=f"prank:{p.key}",
+        )]
+        for p in chunk
     ]
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"pranks:page:{page - 1}"))
+    nav.append(InlineKeyboardButton(text=f"{page + 1}/{pages}", callback_data="noop"))
+    if page < pages - 1:
+        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"pranks:page:{page + 1}"))
+    rows.append(nav)
     rows.append([InlineKeyboardButton(text="⬅️ В меню", callback_data=with_owner("menu:main", owner))])
     await message.edit_text("😈 <b>Пакости</b>\nВыбери, что устроить:", reply_markup=_kb(rows))
 
@@ -45,6 +61,15 @@ async def pranks_menu(cb: CallbackQuery):
     if not await storage.get_profile(cb.from_user.id):
         return await cb.answer("Сначала зарегистрируйся 😉", show_alert=True)
     await _render_menu(cb.message, cb.from_user.id)
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("pranks:page:"))
+async def pranks_page(cb: CallbackQuery):
+    if not await ensure_private(cb):
+        return
+    page = int(cb.data.split(":")[2])
+    await _render_menu(cb.message, cb.from_user.id, page)
     await cb.answer()
 
 

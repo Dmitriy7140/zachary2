@@ -27,6 +27,9 @@ ZAHAR_NBT = (
     'Offers:{Recipes:[]},PersistenceRequired:1b}'
 )
 
+# Пиллагер «Злой Захар»: враждебен по умолчанию, агрится на ближайшего игрока.
+RAID_NBT = '{CustomName:\'{"text":"Злой Захар"}\',CustomNameVisible:1b,PersistenceRequired:1b}'
+
 
 # Тексты-открытки на экран для «Написать письмо»
 TITLE_PHRASES = [
@@ -122,6 +125,31 @@ PRANKS: dict[str, Prank] = {
             "{buyer} вызвал {victim} на ковёр: 30 Захаров окружили и хрюкают. Это надолго.",
         ),
     ),
+    "zahar_raid": Prank(
+        "zahar_raid", "Налет Захаров", 200, "summon",
+        entity="minecraft:pillager", nbt=RAID_NBT, count=15,
+        messages=(
+            "{buyer} натравил на {victim} налёт Захаров — 15 Злых Захаров с арбалетами уже бегут стрелять 🏹",
+            "Тревога! 15 Злых Захаров высадились у {victim}. Спасибо {buyer}, теперь беги.",
+            "{buyer} устроил {victim} тёплую встречу: 15 разъярённых Захаров открыли огонь.",
+        ),
+    ),
+}
+
+
+# Иконки для меню пакостей
+PRANK_EMOJI = {
+    "warden_roar": "🗣",
+    "blindness": "🌑",
+    "nausea": "🌯",
+    "levitation": "🎈",
+    "slowness": "👴",
+    "fatigue": "🍾",
+    "glowing": "💡",
+    "title": "✉️",
+    "darkness": "🕶",
+    "zahar": "🧑‍🌾",
+    "zahar_raid": "🏹",
 }
 
 
