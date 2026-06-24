@@ -10,11 +10,22 @@ class Prank:
     key: str
     name: str
     price: int
-    kind: str            # "effect" | "sound" | "title"
+    kind: str            # "effect" | "sound" | "title" | "summon"
     effect: str = ""
     amp: int = 0
     sound: str = ""
+    entity: str = ""
+    nbt: str = ""
+    count: int = 0
     messages: tuple = ()
+
+
+# Нитвит по имени «Захар»: профессии нет -> торговать нельзя. Синтаксис под 1.21.1.
+ZAHAR_NBT = (
+    '{CustomName:\'{"text":"Захар"}\',CustomNameVisible:1b,'
+    'VillagerData:{profession:"minecraft:nitwit",type:"minecraft:plains",level:1},'
+    'Offers:{Recipes:[]},PersistenceRequired:1b}'
+)
 
 
 # Тексты-открытки на экран для «Написать письмо»
@@ -102,6 +113,15 @@ PRANKS: dict[str, Prank] = {
             "Зрение {victim} упало до минус десяти стараниями {buyer}.",
         ),
     ),
+    "zahar": Prank(
+        "zahar", "Делегация Захаров", 100, "summon",
+        entity="minecraft:villager", nbt=ZAHAR_NBT, count=30,
+        messages=(
+            "{buyer} прислал {victim} делегацию Захаров — 30 нитвитов обступили жертву и молча смотрят 👁",
+            "К {victim} с официальным визитом прибыли 30 Захаров. Торговать отказываются, уходить — тоже. Организатор: {buyer}.",
+            "{buyer} вызвал {victim} на ковёр: 30 Захаров окружили и хрюкают. Это надолго.",
+        ),
+    ),
 }
 
 
@@ -112,6 +132,8 @@ def prank_commands(p: Prank, nick: str) -> list[str]:
     if p.kind == "sound":
         # execute at <ник> — звук в точке игрока, иначе он его не слышит
         return [f"execute at {nick} run playsound {p.sound} master {nick} ~ ~ ~ 100 1 1"]
+    if p.kind == "summon":
+        return [f"execute at {nick} run summon {p.entity} ~ ~ ~ {p.nbt}"] * p.count
     if p.kind == "title":
         phrase = random.choice(TITLE_PHRASES)
         return [
