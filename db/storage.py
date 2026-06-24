@@ -237,3 +237,17 @@ async def set_cooldown(tg_id: int, game: str) -> None:
         (tg_id, game, now),
     )
     await _db.commit()
+
+
+async def reset_all_cooldowns() -> int:
+    """Сбросить кулдауны по играм у всех. Вернуть число удалённых записей."""
+    cur = await _db.execute("DELETE FROM cooldowns")
+    await _db.commit()
+    return cur.rowcount
+
+
+async def clear_inventory(tg_id: int) -> int:
+    """Удалить все предметы игрока. Вернуть число удалённых записей."""
+    cur = await _db.execute("DELETE FROM inventory WHERE tg_id = ?", (tg_id,))
+    await _db.commit()
+    return cur.rowcount

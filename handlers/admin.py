@@ -28,6 +28,28 @@ async def gimme(msg: Message):
     delete_later(msg.bot, sent.chat.id, sent.message_id)
 
 
+@router.message(Command("resetcd"))
+async def reset_cd(msg: Message):
+    """Сбросить все кулдауны по играм (у всех)."""
+    if msg.from_user.id != config.admin_id:
+        return
+    delete_later(msg.bot, msg.chat.id, msg.message_id)
+    n = await storage.reset_all_cooldowns()
+    sent = await msg.answer(f"♻️ Сброшены все кулдауны по играм (записей: {n}).")
+    delete_later(msg.bot, sent.chat.id, sent.message_id)
+
+
+@router.message(Command("clearitems"))
+async def clear_items(msg: Message):
+    """Удалить все предметы у себя."""
+    if msg.from_user.id != config.admin_id:
+        return
+    delete_later(msg.bot, msg.chat.id, msg.message_id)
+    n = await storage.clear_inventory(msg.from_user.id)
+    sent = await msg.answer(f"🗑 Удалены все твои предметы (записей: {n}).")
+    delete_later(msg.bot, sent.chat.id, sent.message_id)
+
+
 @router.message(Command("recalc"))
 async def recalc(msg: Message, command: CommandObject, bot: Bot):
     """Принудительный пересчёт опыта за день (по умолчанию — сегодня).
