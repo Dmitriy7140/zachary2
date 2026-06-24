@@ -30,8 +30,9 @@ async def games_menu(cb: CallbackQuery):
         return await cb.answer("Сначала зарегистрируйся 😉", show_alert=True)
     rows = [
         [InlineKeyboardButton(text="🐐 Подоить козу", callback_data=with_owner("goat:start", owner))],
-        # «Бей Вовку» — только в личке, без owner (gated через ensure_private)
+        # «Бей Вовку» и «Рулетка» — только в личке, без owner (gated через ensure_private)
         [InlineKeyboardButton(text="🥊 Бей Вовку", callback_data="vovka:start")],
+        [InlineKeyboardButton(text="🎰 Рулетка", callback_data="roulette:start")],
         [InlineKeyboardButton(text="⬅️ В меню", callback_data=with_owner("menu:main", owner))],
     ]
     await cb.message.edit_text("🎲 <b>Мини-игры</b>\nВыбери забаву:", reply_markup=_kb(rows))
