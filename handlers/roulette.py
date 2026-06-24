@@ -10,16 +10,19 @@ from aiogram import Bot, F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.utils.markdown import hlink
 
 from db import storage
 from keyboards import back_menu
 from utils.cleanup import delete_later
 from utils.guards import ensure_private, with_owner
+from utils.notify import announce
 
 router = Router()
 
 WHEEL = {"green": ("🟢", "ЗЕЛЁНОЕ"), "red": ("🔴", "КРАСНОЕ"), "black": ("⚫", "ЧЁРНОЕ")}
 MULT = {"green": 10, "red": 1.5, "black": 1.5}  # множитель выигрыша по цвету
+_rng = random.SystemRandom()  # энтропия ОС — честный независимый спин
 
 
 class RouletteStates(StatesGroup):
@@ -33,7 +36,7 @@ async def roulette_start(cb: CallbackQuery):
     profile = await storage.get_profile(cb.from_user.id)
     if not profile:
         return await cb.answer("Сначала зарегистрируйся 😉", show_alert=True)
-    if profile[3] // 2 < 1:
+    if profile[3] < 1:
         return await cb.answer("Маловато Z для ставки 😅", show_alert=True)
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -60,7 +63,7 @@ async def roulette_color(cb: CallbackQuery, state: FSMContext):
     profile = await storage.get_profile(cb.from_user.id)
     if not profile:
         return await cb.answer("Сначала зарегистрируйся 😉", show_alert=True)
-    max_bet = profile[3] // 2
+    max_bet = profile[3]
     if max_bet < 1:
         return await cb.answer("Маловато Z для ставки 😅", show_alert=True)
 
@@ -71,7 +74,7 @@ async def roulette_color(cb: CallbackQuery, state: FSMContext):
     await cb.message.edit_text(
         f"🎰 Ставка на {emoji} <b>{name}</b>\n"
         f"Баланс: <b>{profile[3]} Z</b>\n"
-        f"Сколько ставишь? Макс <b>{max_bet} Z</b> (50%).\n"
+        f"Сколько ставишь? Можно всё — до <b>{max_bet} Z</b>.\n"
         "Напиши число одним сообщением:"
     )
     await cb.answer()
@@ -100,9 +103,8 @@ async def roulette_bet(msg: Message, state: FSMContext, bot: Bot):
     if not await storage.spend_zbucks(tg_id, bet):
         return await finish("❌ Недостаточно Z — отменено.")
 
-    # Спин колеса
-    r = random.random()
-    wheel = "green" if r < 0.10 else "red" if r < 0.55 else "black"
+    # Спин колеса (SystemRandom + явные веса)
+    wheel = _rng.choices(("green", "red", "black"), weights=(10, 45, 45))[0]
     emoji, name = WHEEL[wheel]
     bet_emoji, bet_name = WHEEL[data["color"]]
 
@@ -110,6 +112,8 @@ async def roulette_bet(msg: Message, state: FSMContext, bot: Bot):
         payout = int(bet * MULT[data["color"]])
         await storage.add_zbucks(tg_id, payout)
         line = f"Выпало {emoji} <b>{name}</b> — угадал! 🎉\nСтавка {bet} → <b>{payout} Z</b>"
+        mention = hlink(msg.from_user.full_name, f"tg://user?id={tg_id}")
+        await announce(bot, f"🎰 {mention} поймал {emoji} {name} в рулетке и забрал {payout} Z!")
     else:
         line = f"Выпало {emoji} <b>{name}</b> — мимо 💀\nСтавка {bet} Z сгорела (ты ставил на {bet_emoji})"
 

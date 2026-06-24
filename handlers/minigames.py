@@ -4,12 +4,14 @@ from datetime import datetime, timedelta
 
 from aiogram import F, Router
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.utils.markdown import hlink
 
 from content import goat
 from db import storage
 from game.items import ITEMS
 from keyboards import back_menu
 from utils.guards import ensure_owner, with_owner
+from utils.notify import announce
 
 router = Router()
 
@@ -108,6 +110,8 @@ async def goat_round2(cb: CallbackQuery):
         f"{goat.success(opt)}\n\n💰 +50 Z\n\n———\n{round3}", reply_markup=back_menu(owner)
     )
     await cb.answer()
+    mention = hlink(cb.from_user.full_name, f"tg://user?id={tg_id}")
+    await announce(cb.bot, f"🐐 {mention} успешно подоил козу 🥛")
 
 
 async def _round3(tg_id: int) -> str:
