@@ -12,6 +12,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from aiogram.utils.markdown import hlink
 
+from content import casino
 from db import storage
 from keyboards import back_menu
 from utils.cleanup import delete_later
@@ -108,14 +109,15 @@ async def roulette_bet(msg: Message, state: FSMContext, bot: Bot):
     emoji, name = WHEEL[wheel]
     bet_emoji, bet_name = WHEEL[data["color"]]
 
+    mention = hlink(msg.from_user.full_name, f"tg://user?id={tg_id}")
     if wheel == data["color"]:
         payout = int(bet * MULT[data["color"]])
         await storage.add_zbucks(tg_id, payout)
         line = f"Выпало {emoji} <b>{name}</b> — угадал! 🎉\nСтавка {bet} → <b>{payout} Z</b>"
-        mention = hlink(msg.from_user.full_name, f"tg://user?id={tg_id}")
-        await announce(bot, f"🎰 {mention} поймал {emoji} {name} в рулетке и забрал {payout} Z!")
+        await announce(bot, casino.win_msg(mention, payout))
     else:
         line = f"Выпало {emoji} <b>{name}</b> — мимо 💀\nСтавка {bet} Z сгорела (ты ставил на {bet_emoji})"
+        await announce(bot, casino.loss_msg(mention, bet))
 
     new_balance = (await storage.get_profile(tg_id))[3]
     await finish(f"🎰 {line}\n\nБаланс: <b>{new_balance} Z</b>")
