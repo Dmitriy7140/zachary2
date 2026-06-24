@@ -24,9 +24,9 @@ router = Router()
 ROUNDS = 5
 WIN_REWARD = 5
 WIN_THRESHOLD = 3
-COST = 20
+COST = 15
 COOLDOWN = timedelta(minutes=30)
-ROUND_TIME = 4   # сек на раунд
+ROUND_TIME = 2   # сек на реакцию (бездействие = проигрыш раунда)
 GAP = 2          # сек между раундами
 
 BALD = "👨‍🦲"
@@ -75,6 +75,27 @@ async def vovka_start(cb: CallbackQuery, bot: Bot):
     except Exception:
         pass
     await cb.answer()
+    _spawn(_intro_then_start(bot, tg_id))
+
+
+async def _intro_then_start(bot: Bot, tg_id: int) -> None:
+    state = _games.get(tg_id)
+    if not state:
+        return
+    sent = await bot.send_message(
+        state["chat_id"],
+        f"🥊 <b>Бей лысого!</b>\n\n"
+        f"Бей: {BALD}\n"
+        f"Не бей: {HAIRY}\n\n"
+        f"Начинаем через 5 секунд…",
+    )
+    await asyncio.sleep(5)
+    if tg_id not in _games:
+        return
+    try:
+        await bot.delete_message(state["chat_id"], sent.message_id)
+    except Exception:
+        pass
     await _start_round(bot, tg_id)
 
 
@@ -103,7 +124,7 @@ async def _start_round(bot: Bot, tg_id: int) -> None:
 
     sent = await bot.send_message(
         state["chat_id"],
-        f"🥊 Раунд {rnd}/{ROUNDS} — бей Вовку (лысого {BALD})! ⏱ 4 сек",
+        f"🥊 Раунд {rnd}/{ROUNDS} — бей Вовку (лысого {BALD})! ⏱ 2 сек",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
     )
     state["msg_id"] = sent.message_id
