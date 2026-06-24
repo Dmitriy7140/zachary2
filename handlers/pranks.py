@@ -14,6 +14,7 @@ from keyboards import back_menu
 from mc.rcon import online_players, rcon
 from utils.cleanup import delete_later
 from utils.guards import ensure_private, with_owner
+from utils.pagination import nav_row, page_slice
 
 log = logging.getLogger(__name__)
 router = Router()
@@ -31,11 +32,7 @@ def _kb(rows) -> InlineKeyboardMarkup:
 
 
 async def _render_menu(message, owner: int, page: int = 0) -> None:
-    items = list(PRANKS.values())
-    pages = max(1, (len(items) + PAGE_SIZE - 1) // PAGE_SIZE)
-    page = max(0, min(page, pages - 1))
-    chunk = items[page * PAGE_SIZE:(page + 1) * PAGE_SIZE]
-
+    chunk, page, pages = page_slice(list(PRANKS.values()), page, PAGE_SIZE)
     rows = [
         [InlineKeyboardButton(
             text=f"{PRANK_EMOJI.get(p.key, '😈')} {p.name} — {p.price} Z",
@@ -43,13 +40,8 @@ async def _render_menu(message, owner: int, page: int = 0) -> None:
         )]
         for p in chunk
     ]
-    nav = []
-    if page > 0:
-        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"pranks:page:{page - 1}"))
-    nav.append(InlineKeyboardButton(text=f"{page + 1}/{pages}", callback_data="noop"))
-    if page < pages - 1:
-        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"pranks:page:{page + 1}"))
-    rows.append(nav)
+    if pages > 1:
+        rows.append(nav_row(page, pages, "pranks:page:"))
     rows.append([InlineKeyboardButton(text="⬅️ В меню", callback_data=with_owner("menu:main", owner))])
     await message.edit_text("😈 <b>Пакости</b>\nВыбери, что устроить:", reply_markup=_kb(rows))
 
@@ -90,24 +82,38 @@ async def prank_flow(cb: CallbackQuery, bot: Bot, state: FSMContext):
         await _execute(cb, bot, prank, parts[2])
 
 
-async def _choose_target(cb: CallbackQuery, prank) -> None:
+async def _choose_target(cb: CallbackQuery, prank, page: int = 0) -> None:
     try:
-        players = await online_players()
+        players = sorted(await online_players())
     except Exception:
         return await cb.answer("⚠️ Сервер недоступен", show_alert=True)
     if not players:
         return await cb.answer("🌙 На сервере никого — некого пакостить", show_alert=True)
 
+    chunk, page, pages = page_slice(players, page, PAGE_SIZE)
     rows = [
         [InlineKeyboardButton(text=f"🎯 {nick}", callback_data=f"prank:{prank.key}:{nick}")]
-        for nick in players
+        for nick in chunk
     ]
+    if pages > 1:
+        rows.append(nav_row(page, pages, f"vpage:{prank.key}:"))
     rows.append([InlineKeyboardButton(text="⬅️ К пакостям", callback_data="menu:pranks")])
     await cb.message.edit_text(
         f"😈 <b>{prank.name}</b> — {prank.price} Z\nНа кого накладываем?",
         reply_markup=_kb(rows),
     )
     await cb.answer()
+
+
+@router.callback_query(F.data.startswith("vpage:"))
+async def victim_page(cb: CallbackQuery):
+    if not await ensure_private(cb):
+        return
+    _, key, page = cb.data.split(":")
+    prank = PRANKS.get(key)
+    if not prank:
+        return await cb.answer("Нет такой пакости", show_alert=True)
+    await _choose_target(cb, prank, int(page))
 
 
 async def _execute(cb: CallbackQuery, bot: Bot, prank, nick: str) -> None:

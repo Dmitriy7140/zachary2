@@ -17,6 +17,7 @@ class Prank:
     entity: str = ""
     nbt: str = ""
     count: int = 0
+    weapons: tuple = ()  # если задано — каждому мобу случайное оружие в руку
     messages: tuple = ()
 
 
@@ -128,6 +129,7 @@ PRANKS: dict[str, Prank] = {
     "zahar_raid": Prank(
         "zahar_raid", "Налет Захаров", 200, "summon",
         entity="minecraft:pillager", nbt=RAID_NBT, count=15,
+        weapons=("minecraft:iron_sword", "minecraft:crossbow"),
         messages=(
             "{buyer} натравил на {victim} налёт Захаров — 15 Злых Захаров с арбалетами уже бегут стрелять 🏹",
             "Тревога! 15 Злых Захаров высадились у {victim}. Спасибо {buyer}, теперь беги.",
@@ -153,6 +155,12 @@ PRANK_EMOJI = {
 }
 
 
+def _arm(nbt: str, weapon: str) -> str:
+    """Вставить HandItems с оружием перед закрывающей скобкой NBT."""
+    hands = f'HandItems:[{{id:"{weapon}",count:1}},{{}}]'
+    return f"{nbt[:-1]},{hands}}}"
+
+
 def prank_commands(p: Prank, nick: str) -> list[str]:
     """RCON-команды для пакости на игрока `nick`."""
     if p.kind == "effect":
@@ -161,6 +169,11 @@ def prank_commands(p: Prank, nick: str) -> list[str]:
         # execute at <ник> — звук в точке игрока, иначе он его не слышит
         return [f"execute at {nick} run playsound {p.sound} master {nick} ~ ~ ~ 100 1 1"]
     if p.kind == "summon":
+        if p.weapons:  # каждому мобу — случайное оружие в руку
+            return [
+                f"execute at {nick} run summon {p.entity} ~ ~ ~ {_arm(p.nbt, random.choice(p.weapons))}"
+                for _ in range(p.count)
+            ]
         return [f"execute at {nick} run summon {p.entity} ~ ~ ~ {p.nbt}"] * p.count
     if p.kind == "title":
         phrase = random.choice(TITLE_PHRASES)
