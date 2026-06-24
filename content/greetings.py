@@ -19,9 +19,23 @@ _FIRST_TIME = [
 ]
 
 
+_FAREWELLS = [
+    "👋 {nick} вышел. Сервер выдохнул.",
+    "🚪 {nick} свалил — до новых встреч.",
+    "💤 {nick} ушёл в офлайн. Без него как-то тихо.",
+    "🏃 {nick} покинул сервер. Кто теперь будет фармить курей?",
+    "🌚 {nick} отключился. F в чат.",
+    "📉 {nick} вышел. Онлайн просел, настроение тоже.",
+]
+
+
 def random_greeting(nick: str) -> str:
     return random.choice(_GREETINGS).format(nick=nick)
 
 
 def first_time_greeting(nick: str) -> str:
     return random.choice(_FIRST_TIME).format(nick=nick)
+
+
+def random_farewell(nick: str) -> str:
+    return random.choice(_FAREWELLS).format(nick=nick)

@@ -16,7 +16,7 @@ router = Router()
 async def online(msg: Message):
     """Живой тест RCON: показать, кто сейчас на сервере."""
     try:
-        players = await asyncio.wait_for(online_players(), timeout=8)
+        players = await online_players()
     except asyncio.TimeoutError:
         await msg.answer("⌛ Сервер не ответил (RCON-таймаут). Порт открыт, но обмен завис — проверь пароль/бинд.")
         return

@@ -1,11 +1,11 @@
-"""Фоновый опрос сервера: ловим заходы игроков и шлём приветствия."""
+"""Фоновый опрос сервера: ловим заходы/выходы игроков и шлём приветствия."""
 import asyncio
 import logging
 
 from aiogram import Bot
 
 from config import config
-from content.greetings import random_greeting, first_time_greeting
+from content.greetings import random_greeting, first_time_greeting, random_farewell
 from db import storage
 from keyboards import register_kb
 
@@ -28,11 +28,17 @@ async def run_poller(bot: Bot) -> None:
             now = await online_players_safe()
             if now is None:
                 continue
+            # Множества сами разруливают «зашло/вышло сразу несколько».
             for nick in now - known_online:
                 try:
                     await handle_join(bot, nick)
                 except Exception as e:
                     log.exception("Не удалось обработать заход %s: %s", nick, e)
+            for nick in known_online - now:
+                try:
+                    await handle_leave(bot, nick)
+                except Exception as e:
+                    log.exception("Не удалось обработать выход %s: %s", nick, e)
             known_online = now
     except asyncio.CancelledError:
         log.info("Поллер остановлен")
@@ -42,25 +48,31 @@ async def run_poller(bot: Bot) -> None:
 async def online_players_safe() -> set[str] | None:
     from mc.rcon import online_players
     try:
-        return set(await asyncio.wait_for(online_players(), timeout=8))
+        return set(await online_players())
     except asyncio.TimeoutError:
-        log.warning("RCON: таймаут — порт 25575 недоступен (фаервол Яндекса режет вход с бота?)")
+        log.warning("RCON: таймаут — сервер не ответил")
         return None
     except Exception as e:
         log.warning("RCON опрос не удался: %s", e)
         return None
 
 
-async def handle_join(bot: Bot, nick: str) -> None:
-    is_new = await storage.register_seen(nick)
-    if is_new:
-        text, kb = first_time_greeting(nick), register_kb(nick)
-    else:
-        text, kb = random_greeting(nick), None
-
+async def _post(bot: Bot, text: str, kb=None) -> None:
     await bot.send_message(
         chat_id=config.channel_id,
         message_thread_id=config.thread_id or None,
         text=text,
         reply_markup=kb,
     )
+
+
+async def handle_join(bot: Bot, nick: str) -> None:
+    is_new = await storage.register_seen(nick)
+    if is_new:
+        await _post(bot, first_time_greeting(nick), register_kb(nick))
+    else:
+        await _post(bot, random_greeting(nick))
+
+
+async def handle_leave(bot: Bot, nick: str) -> None:
+    await _post(bot, random_farewell(nick))

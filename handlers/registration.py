@@ -23,6 +23,12 @@ async def on_register_click(cb: CallbackQuery, bot: Bot):
     )
     await cb.answer("Заявка отправлена! Жди подтверждения 🙌", show_alert=True)
 
+    # Удаляем приглашение из треда сразу после клика.
+    try:
+        await cb.message.delete()
+    except Exception:
+        pass  # сообщение могло устареть (>48ч) или уже удалено
+
 
 @router.callback_query(F.data.startswith("approve:"))
 async def on_approve(cb: CallbackQuery, bot: Bot):
@@ -33,7 +39,15 @@ async def on_approve(cb: CallbackQuery, bot: Bot):
     tg_id = int(tg_id_raw)
 
     if await storage.create_profile(tg_id, None, nick):
+        # Поздравление — в тред, а не в личку админу.
+        await bot.send_message(
+            chat_id=config.channel_id,
+            message_thread_id=config.thread_id or None,
+            text=f"🎉 <b>{nick}</b> теперь в <b>ZakharCompanion</b>! Добро пожаловать в банду 💰",
+        )
+        # Короткий ответ админу, чтобы кнопки заявки погасли.
         await cb.message.edit_text(f"✅ {nick} зарегистрирован (tg <code>{tg_id}</code>).")
+        # Личное уведомление самому игроку (если он писал боту).
         try:
             await bot.send_message(
                 tg_id,
