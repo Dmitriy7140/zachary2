@@ -1,12 +1,34 @@
 """ZakharCompanion: профиль, баланс, заглушки разделов."""
+import asyncio
+
 from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, Message
 
 from db import storage
 from keyboards import main_menu
+from mc.rcon import online_players
 
 router = Router()
+
+
+@router.message(Command("online"))
+async def online(msg: Message):
+    """Живой тест RCON: показать, кто сейчас на сервере."""
+    try:
+        players = await asyncio.wait_for(online_players(), timeout=8)
+    except asyncio.TimeoutError:
+        await msg.answer("⌛ Сервер не ответил (RCON-таймаут). Порт открыт, но обмен завис — проверь пароль/бинд.")
+        return
+    except Exception as e:
+        await msg.answer(f"⚠️ Не удалось связаться с сервером:\n<code>{e}</code>")
+        return
+
+    if not players:
+        await msg.answer("🌙 На сервере сейчас никого.")
+    else:
+        lst = "\n".join(f"• {p}" for p in players)
+        await msg.answer(f"🎮 Онлайн ({len(players)}):\n{lst}")
 
 
 @router.message(CommandStart())

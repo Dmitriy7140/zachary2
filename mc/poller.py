@@ -42,7 +42,10 @@ async def run_poller(bot: Bot) -> None:
 async def online_players_safe() -> set[str] | None:
     from mc.rcon import online_players
     try:
-        return set(await online_players())
+        return set(await asyncio.wait_for(online_players(), timeout=8))
+    except asyncio.TimeoutError:
+        log.warning("RCON: таймаут — порт 25575 недоступен (фаервол Яндекса режет вход с бота?)")
+        return None
     except Exception as e:
         log.warning("RCON опрос не удался: %s", e)
         return None
