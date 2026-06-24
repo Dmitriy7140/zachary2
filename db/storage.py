@@ -34,6 +34,22 @@ async def init() -> None:
             seconds INTEGER DEFAULT 0,
             PRIMARY KEY (nick, day)
         );
+
+        -- инвентарь игроков
+        CREATE TABLE IF NOT EXISTS inventory (
+            tg_id INTEGER,
+            item  TEXT,
+            qty   INTEGER DEFAULT 0,
+            PRIMARY KEY (tg_id, item)
+        );
+
+        -- кулдауны мини-игр
+        CREATE TABLE IF NOT EXISTS cooldowns (
+            tg_id   INTEGER,
+            game    TEXT,
+            used_at TEXT,
+            PRIMARY KEY (tg_id, game)
+        );
         """
     )
     # миграции для уже существующей БД
@@ -154,4 +170,70 @@ async def apply_daily_xp(tg_id: int, xp: int, level: int, zbucks_gain: int) -> N
 async def clear_playtime(until_day: str) -> None:
     """Удалить накопленное время по день `until_day` включительно."""
     await _db.execute("DELETE FROM playtime WHERE day <= ?", (until_day,))
+    await _db.commit()
+
+
+# --- Zbucks / инвентарь / кулдауны ---
+
+async def spend_zbucks(tg_id: int, amount: int) -> bool:
+    """Списать Zbucks. False, если не хватает."""
+    cur = await _db.execute("SELECT zbucks FROM profiles WHERE tg_id = ?", (tg_id,))
+    row = await cur.fetchone()
+    if not row or row[0] < amount:
+        return False
+    await _db.execute(
+        "UPDATE profiles SET zbucks = zbucks - ? WHERE tg_id = ?", (amount, tg_id)
+    )
+    await _db.commit()
+    return True
+
+
+async def get_item_qty(tg_id: int, item: str) -> int:
+    cur = await _db.execute(
+        "SELECT qty FROM inventory WHERE tg_id = ? AND item = ?", (tg_id, item)
+    )
+    row = await cur.fetchone()
+    return row[0] if row else 0
+
+
+async def get_inventory(tg_id: int) -> dict[str, int]:
+    cur = await _db.execute(
+        "SELECT item, qty FROM inventory WHERE tg_id = ? AND qty > 0", (tg_id,)
+    )
+    return {row[0]: row[1] for row in await cur.fetchall()}
+
+
+async def add_item(tg_id: int, item: str, qty: int = 1, max_qty: int | None = None) -> int:
+    """Добавить предмет (с потолком max_qty). Вернуть новое количество."""
+    new = await get_item_qty(tg_id, item) + qty
+    if max_qty is not None:
+        new = min(new, max_qty)
+    await _db.execute(
+        """
+        INSERT INTO inventory (tg_id, item, qty) VALUES (?, ?, ?)
+        ON CONFLICT (tg_id, item) DO UPDATE SET qty = excluded.qty
+        """,
+        (tg_id, item, new),
+    )
+    await _db.commit()
+    return new
+
+
+async def get_cooldown(tg_id: int, game: str) -> str | None:
+    cur = await _db.execute(
+        "SELECT used_at FROM cooldowns WHERE tg_id = ? AND game = ?", (tg_id, game)
+    )
+    row = await cur.fetchone()
+    return row[0] if row else None
+
+
+async def set_cooldown(tg_id: int, game: str) -> None:
+    now = datetime.now().isoformat()
+    await _db.execute(
+        """
+        INSERT INTO cooldowns (tg_id, game, used_at) VALUES (?, ?, ?)
+        ON CONFLICT (tg_id, game) DO UPDATE SET used_at = excluded.used_at
+        """,
+        (tg_id, game, now),
+    )
     await _db.commit()

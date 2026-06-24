@@ -58,20 +58,21 @@ async def start(msg: Message):
     await msg.answer(_profile_card(profile), reply_markup=main_menu())
 
 
-@router.message(Command("profile"))
-async def profile_cmd(msg: Message):
-    profile = await storage.get_profile(msg.from_user.id)
-    if not profile:
-        return await msg.answer("Сначала зарегистрируйся 😉")
-    await msg.answer(_profile_card(profile), reply_markup=main_menu())
-
-
 @router.message(Command("balance"))
 async def balance(msg: Message):
     profile = await storage.get_profile(msg.from_user.id)
     if not profile:
         return await msg.answer("Сначала зарегистрируйся 😉")
     await msg.answer(f"💰 Баланс: <b>{profile[3]} Z</b>")
+
+
+@router.callback_query(F.data == "menu:main")
+async def cb_main(cb: CallbackQuery):
+    profile = await storage.get_profile(cb.from_user.id)
+    if not profile:
+        return await cb.answer("Сначала зарегистрируйся 😉", show_alert=True)
+    await cb.message.edit_text(_profile_card(profile), reply_markup=main_menu())
+    await cb.answer()
 
 
 @router.callback_query(F.data == "menu:balance")
@@ -81,6 +82,6 @@ async def cb_balance(cb: CallbackQuery):
     await cb.answer(f"💰 {bal} Z", show_alert=True)
 
 
-@router.callback_query(F.data.in_({"menu:games", "menu:shop", "menu:pranks"}))
+@router.callback_query(F.data == "menu:pranks")
 async def cb_stub(cb: CallbackQuery):
     await cb.answer("🚧 Раздел в разработке", show_alert=True)

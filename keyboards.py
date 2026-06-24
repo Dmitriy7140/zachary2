@@ -22,8 +22,15 @@ def main_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="🎲 Мини-игры", callback_data="menu:games")],
+            [InlineKeyboardButton(text="🎒 Инвентарь", callback_data="menu:inventory")],
             [InlineKeyboardButton(text="🛒 Магазин", callback_data="menu:shop")],
             [InlineKeyboardButton(text="😈 Пакости", callback_data="menu:pranks")],
             [InlineKeyboardButton(text="💰 Баланс", callback_data="menu:balance")],
         ]
+    )
+
+
+def back_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="⬅️ В меню", callback_data="menu:main")]]
     )
