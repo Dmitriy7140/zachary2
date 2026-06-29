@@ -13,6 +13,8 @@ from game.leveling import daily_xp, level_from_xp, xp_for_level, zbucks_for_leve
 
 log = logging.getLogger(__name__)
 
+ALLOWANCE = 30  # «пособие по инвалидности» — всем раз в день
+
 
 def _seconds_until_midnight() -> float:
     now = datetime.now()
@@ -39,13 +41,15 @@ async def run_daily_scheduler(bot: Bot) -> None:
         raise
 
 
-async def process_day(bot: Bot, day: str) -> None:
+async def process_day(bot: Bot, day: str, allowance: bool = True) -> None:
     playtime = await storage.get_day_playtime(day)
     profiles = await storage.all_profiles()
     log.info("Пересчёт опыта за %s: %d профил(ей)", day, len(profiles))
 
     blocks = []
     for tg_id, nick, xp, level in profiles:
+        if allowance:
+            await storage.add_zbucks(tg_id, ALLOWANCE)  # пособие по инвалидности
         minutes = playtime.get(nick, 0) // 60
         gained = daily_xp(minutes)
         new_xp = xp + gained
@@ -61,11 +65,13 @@ async def process_day(bot: Bot, day: str) -> None:
     await storage.clear_playtime(day)
 
     if blocks:
-        text = f"📊 <b>Итоги дня {day}</b>\n\n" + "\n\n".join(blocks)
+        header = f"📊 <b>Итоги дня {day}</b>\n"
+        if allowance:
+            header += f"💸 Пособие по инвалидности: всем +{ALLOWANCE} Z\n"
         await bot.send_message(
             chat_id=config.channel_id,
             message_thread_id=config.thread_id or None,
-            text=text,
+            text=header + "\n" + "\n\n".join(blocks),
         )
 
 

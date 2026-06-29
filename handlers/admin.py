@@ -55,7 +55,7 @@ async def recalc(msg: Message, command: CommandObject, bot: Bot):
     day = (command.args or "").strip() or datetime.now().date().isoformat()
     await msg.answer(f"⏳ Пересчёт опыта за <b>{day}</b>…")
     try:
-        await process_day(bot, day)
+        await process_day(bot, day, allowance=False)  # пособие не дублируем при ручном пересчёте
     except Exception as e:
         await msg.answer(f"⚠️ Ошибка: <code>{e}</code>")
         return
