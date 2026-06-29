@@ -12,11 +12,10 @@ from aiogram import Bot, F, Router
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.markdown import hlink
 
-from config import config
 from db import storage
 from keyboards import back_menu
-from utils.cleanup import delete_later
 from utils.guards import ensure_private
+from utils.notify import announce
 
 log = logging.getLogger(__name__)
 router = Router()
@@ -24,8 +23,8 @@ router = Router()
 ROUNDS = 5
 WIN_REWARD = 5
 WIN_THRESHOLD = 3
-COST = 15
-COOLDOWN = timedelta(minutes=30)
+COST = 0
+COOLDOWN = timedelta(seconds=3)
 ROUND_TIME = 2   # сек на реакцию (бездействие = проигрыш раунда)
 GAP = 2          # сек между раундами
 
@@ -60,10 +59,11 @@ async def vovka_start(cb: CallbackQuery, bot: Bot):
             left = int((COOLDOWN - elapsed).total_seconds())
             return await cb.answer(f"⏳ Вовка отдыхает. Приходи через {left // 60}м {left % 60}с",
                                    show_alert=True)
-    if profile[3] < COST:
+    if COST and profile[3] < COST:
         return await cb.answer(f"Не хватает Z (попытка {COST})", show_alert=True)
 
-    await storage.spend_zbucks(tg_id, COST)
+    if COST:
+        await storage.spend_zbucks(tg_id, COST)
     await storage.set_cooldown(tg_id, "vovka")
     _games[tg_id] = {
         "round": 0, "wins": 0, "active": None,
@@ -219,12 +219,5 @@ async def _finish(bot: Bot, tg_id: int) -> None:
     if reward:
         thread_text = f"🥊 {mention} отлупил Вовку — {wins}/{ROUNDS} побед, забрал {reward} Z!"
     else:
-        thread_text = f"🥊 {mention} пытался бить Вовку и слил ({wins}/{ROUNDS}). {COST} Z на ветер."
-    try:
-        sent = await bot.send_message(
-            chat_id=config.channel_id, message_thread_id=config.thread_id or None,
-            text=thread_text,
-        )
-        delete_later(bot, sent.chat.id, sent.message_id, 60)
-    except Exception:
-        pass
+        thread_text = f"🥊 {mention} бил Вовку, но позорно слил ({wins}/{ROUNDS})."
+    await announce(bot, thread_text)

@@ -201,10 +201,13 @@ async def letter_text(msg: Message, state: FSMContext, bot: Bot):
 
 # --- вспомогательное ---
 async def _announce(bot: Bot, text: str) -> None:
-    sent = await bot.send_message(
-        chat_id=config.channel_id, message_thread_id=config.thread_id or None, text=text
-    )
-    delete_later(bot, sent.chat.id, sent.message_id, 60)
+    # объявления о пакостях не удаляем
+    try:
+        await bot.send_message(
+            chat_id=config.channel_id, message_thread_id=config.thread_id or None, text=text
+        )
+    except Exception:
+        pass
 
 
 def _buyer(tg_id: int, full_name: str) -> str:

@@ -2,6 +2,7 @@
 import asyncio
 
 from aiogram import F, Router
+from aiogram.enums import ChatType
 from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, Message
 
@@ -17,10 +18,11 @@ router = Router()
 
 
 async def _temp(msg: Message, text: str, **kw) -> None:
-    """Ответить и через минуту удалить и ответ, и саму команду."""
+    """Ответить. В группе через минуту убрать и команду, и ответ; в личке — оставить."""
     sent = await msg.answer(text, **kw)
-    delete_later(msg.bot, msg.chat.id, msg.message_id)
-    delete_later(msg.bot, sent.chat.id, sent.message_id)
+    if msg.chat.type != ChatType.PRIVATE:
+        delete_later(msg.bot, msg.chat.id, msg.message_id)
+        delete_later(msg.bot, sent.chat.id, sent.message_id)
 
 
 def _profile_card(profile: tuple) -> str:
@@ -55,7 +57,8 @@ async def online(msg: Message):
 
 @router.message(CommandStart())
 async def start(msg: Message):
-    delete_later(msg.bot, msg.chat.id, msg.message_id)  # убрать саму /start
+    if msg.chat.type != ChatType.PRIVATE:
+        delete_later(msg.bot, msg.chat.id, msg.message_id)  # в группе убрать /start
     profile = await storage.get_profile(msg.from_user.id)
     if not profile:
         await msg.answer(

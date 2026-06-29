@@ -50,11 +50,41 @@ async def init() -> None:
             used_at TEXT,
             PRIMARY KEY (tg_id, game)
         );
+
+        -- активные продажи на рынке
+        CREATE TABLE IF NOT EXISTS market (
+            id      INTEGER PRIMARY KEY AUTOINCREMENT,
+            tg_id   INTEGER,
+            item    TEXT,
+            price   INTEGER,
+            sell_at TEXT
+        );
+
+        -- ставки: события и ставки игроков
+        CREATE TABLE IF NOT EXISTS bets_events (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            creator_id     INTEGER,
+            creator_name   TEXT,
+            description    TEXT,
+            duration_hours INTEGER,
+            bet_close_at   TEXT,
+            resolve_at     TEXT,
+            status         TEXT,   -- betting / closed / pending / resolved
+            outcome        TEXT
+        );
+        CREATE TABLE IF NOT EXISTS bets_stakes (
+            id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id INTEGER,
+            tg_id    INTEGER,
+            side     TEXT,         -- yes / no
+            amount   INTEGER
+        );
         """
     )
     # миграции для уже существующей БД
     await _ensure_column("profiles", "xp", "INTEGER DEFAULT 0")
     await _ensure_column("profiles", "level", "INTEGER DEFAULT 0")
+    await _ensure_column("profiles", "thefts", "INTEGER DEFAULT 0")
     await _db.commit()
 
 
@@ -219,6 +249,146 @@ async def add_item(tg_id: int, item: str, qty: int = 1, max_qty: int | None = No
     return new
 
 
+async def remove_item(tg_id: int, item: str, qty: int = 1) -> bool:
+    """Снять qty предметов. False, если столько нет."""
+    have = await get_item_qty(tg_id, item)
+    if have < qty:
+        return False
+    new = have - qty
+    if new <= 0:
+        await _db.execute("DELETE FROM inventory WHERE tg_id = ? AND item = ?", (tg_id, item))
+    else:
+        await _db.execute(
+            "UPDATE inventory SET qty = ? WHERE tg_id = ? AND item = ?", (new, tg_id, item)
+        )
+    await _db.commit()
+    return True
+
+
+# --- рынок ---
+
+async def add_listing(tg_id: int, item: str, price: int, sell_at: str) -> None:
+    await _db.execute(
+        "INSERT INTO market (tg_id, item, price, sell_at) VALUES (?, ?, ?, ?)",
+        (tg_id, item, price, sell_at),
+    )
+    await _db.commit()
+
+
+async def get_listings(tg_id: int) -> list[tuple]:
+    """Активные продажи игрока: (item, price, sell_at)."""
+    cur = await _db.execute(
+        "SELECT item, price, sell_at FROM market WHERE tg_id = ? ORDER BY sell_at", (tg_id,)
+    )
+    return await cur.fetchall()
+
+
+async def due_listings(now_iso: str) -> list[tuple]:
+    """Продажи, у которых вышел срок: (id, tg_id, item, price)."""
+    cur = await _db.execute(
+        "SELECT id, tg_id, item, price FROM market WHERE sell_at <= ?", (now_iso,)
+    )
+    return await cur.fetchall()
+
+
+async def remove_listing(listing_id: int) -> None:
+    await _db.execute("DELETE FROM market WHERE id = ?", (listing_id,))
+    await _db.commit()
+
+
+# --- ставки ---
+
+async def count_active_events() -> int:
+    cur = await _db.execute("SELECT COUNT(*) FROM bets_events WHERE status != 'resolved'")
+    return (await cur.fetchone())[0]
+
+
+async def create_event(creator_id, creator_name, description, hours, bet_close_at, resolve_at) -> int:
+    cur = await _db.execute(
+        """INSERT INTO bets_events
+           (creator_id, creator_name, description, duration_hours, bet_close_at, resolve_at, status)
+           VALUES (?, ?, ?, ?, ?, ?, 'betting')""",
+        (creator_id, creator_name, description, hours, bet_close_at, resolve_at),
+    )
+    await _db.commit()
+    return cur.lastrowid
+
+
+async def get_event(eid: int) -> tuple | None:
+    cur = await _db.execute(
+        """SELECT id, creator_id, creator_name, description, duration_hours,
+                  bet_close_at, resolve_at, status, outcome
+           FROM bets_events WHERE id = ?""",
+        (eid,),
+    )
+    return await cur.fetchone()
+
+
+async def list_active_events() -> list[tuple]:
+    cur = await _db.execute(
+        """SELECT id, description, duration_hours, bet_close_at, status
+           FROM bets_events WHERE status != 'resolved' ORDER BY id"""
+    )
+    return await cur.fetchall()
+
+
+async def set_event_status(eid: int, status: str) -> None:
+    await _db.execute("UPDATE bets_events SET status = ? WHERE id = ?", (status, eid))
+    await _db.commit()
+
+
+async def resolve_event_db(eid: int, outcome: str) -> None:
+    await _db.execute(
+        "UPDATE bets_events SET status = 'resolved', outcome = ? WHERE id = ?", (outcome, eid)
+    )
+    await _db.commit()
+
+
+async def events_due_close(now_iso: str) -> list[int]:
+    cur = await _db.execute(
+        "SELECT id FROM bets_events WHERE status = 'betting' AND bet_close_at <= ?", (now_iso,)
+    )
+    return [r[0] for r in await cur.fetchall()]
+
+
+async def events_due_resolve(now_iso: str) -> list[int]:
+    cur = await _db.execute(
+        "SELECT id FROM bets_events WHERE status = 'closed' AND resolve_at <= ?", (now_iso,)
+    )
+    return [r[0] for r in await cur.fetchall()]
+
+
+async def add_stake(eid: int, tg_id: int, side: str, amount: int) -> None:
+    await _db.execute(
+        "INSERT INTO bets_stakes (event_id, tg_id, side, amount) VALUES (?, ?, ?, ?)",
+        (eid, tg_id, side, amount),
+    )
+    await _db.commit()
+
+
+async def get_stake(eid: int, tg_id: int) -> tuple | None:
+    cur = await _db.execute(
+        "SELECT side, amount FROM bets_stakes WHERE event_id = ? AND tg_id = ?", (eid, tg_id)
+    )
+    return await cur.fetchone()
+
+
+async def event_stakes(eid: int) -> list[tuple]:
+    cur = await _db.execute(
+        "SELECT tg_id, side, amount FROM bets_stakes WHERE event_id = ?", (eid,)
+    )
+    return await cur.fetchall()
+
+
+async def event_pools(eid: int) -> tuple[int, int]:
+    cur = await _db.execute(
+        "SELECT side, COALESCE(SUM(amount), 0) FROM bets_stakes WHERE event_id = ? GROUP BY side",
+        (eid,),
+    )
+    d = {s: a for s, a in await cur.fetchall()}
+    return d.get("yes", 0), d.get("no", 0)
+
+
 async def get_cooldown(tg_id: int, game: str) -> str | None:
     cur = await _db.execute(
         "SELECT used_at FROM cooldowns WHERE tg_id = ? AND game = ?", (tg_id, game)
@@ -251,3 +421,51 @@ async def clear_inventory(tg_id: int) -> int:
     cur = await _db.execute("DELETE FROM inventory WHERE tg_id = ?", (tg_id,))
     await _db.commit()
     return cur.rowcount
+
+
+# --- воровство ---
+
+async def get_thefts(tg_id: int) -> int:
+    cur = await _db.execute("SELECT thefts FROM profiles WHERE tg_id = ?", (tg_id,))
+    row = await cur.fetchone()
+    return row[0] if row and row[0] is not None else 0
+
+
+async def add_theft(tg_id: int) -> None:
+    await _db.execute("UPDATE profiles SET thefts = thefts + 1 WHERE tg_id = ?", (tg_id,))
+    await _db.commit()
+
+
+async def random_target(exclude_tg_id: int) -> tuple | None:
+    """Случайный другой игрок: (tg_id, nick, zbucks) или None."""
+    cur = await _db.execute(
+        "SELECT tg_id, nick, zbucks FROM profiles WHERE tg_id != ? ORDER BY RANDOM() LIMIT 1",
+        (exclude_tg_id,),
+    )
+    return await cur.fetchone()
+
+
+async def set_theft_cooldown(tg_id: int, hours: float) -> None:
+    """Положить кулдаун воровства: хранит время готовности (expiry)."""
+    from datetime import timedelta
+    until = (datetime.now() + timedelta(hours=hours)).isoformat()
+    await _db.execute(
+        """
+        INSERT INTO cooldowns (tg_id, game, used_at) VALUES (?, 'theft', ?)
+        ON CONFLICT (tg_id, game) DO UPDATE SET used_at = excluded.used_at
+        """,
+        (tg_id, until),
+    )
+    await _db.commit()
+
+
+async def theft_cooldown_left(tg_id: int) -> int:
+    """Сколько секунд до готовности воровства (0 — готов)."""
+    cur = await _db.execute(
+        "SELECT used_at FROM cooldowns WHERE tg_id = ? AND game = 'theft'", (tg_id,)
+    )
+    row = await cur.fetchone()
+    if not row:
+        return 0
+    left = (datetime.fromisoformat(row[0]) - datetime.now()).total_seconds()
+    return max(0, int(left))

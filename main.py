@@ -7,8 +7,11 @@ from aiogram.enums import ParseMode
 
 from config import config
 from db import storage
+from game.bets import run_bets_scheduler
 from game.daily import run_daily_scheduler
-from handlers import admin, companion, inventory, minigames, pranks, registration, roulette, shop, vovka
+from game.market import run_market_scheduler
+from handlers import (admin, bets, companion, inventory, market, minigames, pranks, registration,
+                      roulette, shop, vovka, work)
 from mc.poller import run_poller
 
 logging.basicConfig(
@@ -32,6 +35,9 @@ async def main() -> None:
     dp.include_router(roulette.router)
     dp.include_router(shop.router)
     dp.include_router(inventory.router)
+    dp.include_router(work.router)
+    dp.include_router(market.router)
+    dp.include_router(bets.router)
     dp.include_router(pranks.router)
     dp.include_router(companion.router)
 
@@ -40,6 +46,8 @@ async def main() -> None:
     # уничтожит её прямо во время работы ("Task was destroyed but it is pending").
     poller_task = asyncio.create_task(run_poller(bot))
     daily_task = asyncio.create_task(run_daily_scheduler(bot))
+    market_task = asyncio.create_task(run_market_scheduler(bot))
+    bets_task = asyncio.create_task(run_bets_scheduler(bot))
 
     logging.info("Бот запущен")
     try:
@@ -47,6 +55,8 @@ async def main() -> None:
     finally:
         poller_task.cancel()
         daily_task.cancel()
+        market_task.cancel()
+        bets_task.cancel()
 
 
 if __name__ == "__main__":

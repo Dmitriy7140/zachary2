@@ -126,6 +126,15 @@ PRANKS: dict[str, Prank] = {
             "{buyer} вызвал {victim} на ковёр: 30 Захаров окружили и хрюкают. Это надолго.",
         ),
     ),
+    "lightning": Prank(
+        "lightning", "Шарахнуть молнией", 70, "summon",
+        entity="minecraft:lightning_bolt", count=1,
+        messages=(
+            "{buyer} призвал гнев небес на {victim} — ⚡ БАХ!",
+            "В {victim} шарахнула молния от {buyer}. Пахнет жареным.",
+            "{buyer} зарядил {victim} молнией. Брови сгорели, шерсть дыбом.",
+        ),
+    ),
     "zahar_raid": Prank(
         "zahar_raid", "Налет Захаров", 200, "summon",
         entity="minecraft:pillager", nbt=RAID_NBT, count=15,
@@ -150,6 +159,7 @@ PRANK_EMOJI = {
     "glowing": "💡",
     "title": "✉️",
     "darkness": "🕶",
+    "lightning": "⚡",
     "zahar": "🧑‍🌾",
     "zahar_raid": "🏹",
 }

@@ -22,9 +22,12 @@ def main_menu(owner: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="🎲 Мини-игры", callback_data=f"menu:games:{owner}")],
+            [InlineKeyboardButton(text="💼 Работа", callback_data=f"menu:work:{owner}")],
             [InlineKeyboardButton(text="🎒 Инвентарь", callback_data=f"menu:inventory:{owner}")],
             [InlineKeyboardButton(text="🛒 Магазин", callback_data=f"menu:shop:{owner}")],
-            # Пакости — без owner: они только в личке (ensure_private)
+            # Рынок и Пакости — без owner: только в личке (ensure_private)
+            [InlineKeyboardButton(text="🏪 Рынок", callback_data="menu:market")],
+            [InlineKeyboardButton(text="🎲 Ставки", callback_data="menu:bets")],
             [InlineKeyboardButton(text="😈 Пакости", callback_data="menu:pranks")],
         ]
     )
