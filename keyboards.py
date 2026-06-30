@@ -29,7 +29,8 @@ def main_menu(owner: int) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="🛒 Магазин", callback_data=f"menu:shop:{owner}")],
             [InlineKeyboardButton(text="🏪 Рынок", callback_data="menu:market"),
              InlineKeyboardButton(text="🤝 Ставки", callback_data="menu:bets")],
-            [InlineKeyboardButton(text="😈 Пакости", callback_data="menu:pranks")],
+            [InlineKeyboardButton(text="😈 Пакости", callback_data="menu:pranks"),
+             InlineKeyboardButton(text="🤲 Долг", callback_data="menu:loan")],
         ]
     )
 

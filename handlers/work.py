@@ -5,6 +5,7 @@ from aiogram.utils.markdown import hlink
 
 from content import thief as txt
 from db import storage
+from game.debts import chepushila_days_left, is_chepushila
 from game.thief import (MIN_TARGET_WEALTH, THEFT_THRESHOLDS, is_fail, roll_quality,
                         steal_amount, thief_level)
 from utils.guards import ensure_owner, with_owner
@@ -49,9 +50,17 @@ async def work_menu(cb: CallbackQuery):
 async def work_legal(cb: CallbackQuery):
     if not await ensure_owner(cb):
         return
+    owner = cb.from_user.id
+    if await is_chepushila(owner):
+        days = await chepushila_days_left(owner)
+        await cb.message.edit_text(
+            f"🤡 Ты «Чепушила» — легальная работа закрыта ещё ~{days} дн.\nВозвращай долги вовремя!",
+            reply_markup=_back(owner, "menu:work"),
+        )
+        return await cb.answer()
     await cb.message.edit_text(
         "✅ <b>Легальная работа</b>\nПока вакансий нет — скоро завезём 🛠",
-        reply_markup=_back(cb.from_user.id, "menu:work"),
+        reply_markup=_back(owner, "menu:work"),
     )
     await cb.answer()
 

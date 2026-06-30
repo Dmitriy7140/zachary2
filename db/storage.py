@@ -79,6 +79,17 @@ async def init() -> None:
             side     TEXT,         -- yes / no
             amount   INTEGER
         );
+
+        -- долги (взял в долг у игрока)
+        CREATE TABLE IF NOT EXISTS debts (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            borrower_id INTEGER,
+            lender_id   INTEGER,
+            lender_nick TEXT,
+            amount      INTEGER,
+            created_at  TEXT,
+            defaulted   INTEGER DEFAULT 0
+        );
         """
     )
     # миграции для уже существующей БД
@@ -389,6 +400,95 @@ async def event_pools(eid: int) -> tuple[int, int]:
     return d.get("yes", 0), d.get("no", 0)
 
 
+# --- долги ---
+
+async def add_debt(borrower_id, lender_id, lender_nick, amount, created_at) -> None:
+    await _db.execute(
+        "INSERT INTO debts (borrower_id, lender_id, lender_nick, amount, created_at) VALUES (?, ?, ?, ?, ?)",
+        (borrower_id, lender_id, lender_nick, amount, created_at),
+    )
+    await _db.commit()
+
+
+async def get_debts(borrower_id: int) -> list[tuple]:
+    cur = await _db.execute(
+        "SELECT id, lender_id, lender_nick, amount, defaulted FROM debts WHERE borrower_id = ? ORDER BY id",
+        (borrower_id,),
+    )
+    return await cur.fetchall()
+
+
+async def get_debt(did: int) -> tuple | None:
+    cur = await _db.execute(
+        "SELECT id, borrower_id, lender_id, lender_nick, amount FROM debts WHERE id = ?", (did,)
+    )
+    return await cur.fetchone()
+
+
+async def remove_debt(did: int) -> None:
+    await _db.execute("DELETE FROM debts WHERE id = ?", (did,))
+    await _db.commit()
+
+
+async def total_debt(borrower_id: int) -> int:
+    cur = await _db.execute(
+        "SELECT COALESCE(SUM(amount), 0) FROM debts WHERE borrower_id = ?", (borrower_id,)
+    )
+    return (await cur.fetchone())[0]
+
+
+async def distinct_debtors() -> list[int]:
+    cur = await _db.execute("SELECT DISTINCT borrower_id FROM debts")
+    return [r[0] for r in await cur.fetchall()]
+
+
+async def debts_to_default(cutoff_iso: str) -> list[tuple]:
+    cur = await _db.execute(
+        "SELECT id, borrower_id, lender_nick, amount FROM debts WHERE created_at <= ? AND defaulted = 0",
+        (cutoff_iso,),
+    )
+    return await cur.fetchall()
+
+
+async def mark_debt_defaulted(did: int) -> None:
+    await _db.execute("UPDATE debts SET defaulted = 1 WHERE id = ?", (did,))
+    await _db.commit()
+
+
+# --- статусы/кулдауны по ключу (срок хранится в cooldowns.used_at) ---
+
+async def set_cooldown_until(tg_id: int, key: str, until_iso: str) -> None:
+    await _db.execute(
+        """INSERT INTO cooldowns (tg_id, game, used_at) VALUES (?, ?, ?)
+           ON CONFLICT (tg_id, game) DO UPDATE SET used_at = excluded.used_at""",
+        (tg_id, key, until_iso),
+    )
+    await _db.commit()
+
+
+async def cooldown_left_secs(tg_id: int, key: str) -> int:
+    cur = await _db.execute(
+        "SELECT used_at FROM cooldowns WHERE tg_id = ? AND game = ?", (tg_id, key)
+    )
+    row = await cur.fetchone()
+    if not row:
+        return 0
+    return max(0, int((datetime.fromisoformat(row[0]) - datetime.now()).total_seconds()))
+
+
+async def clear_status(tg_id: int, key: str) -> None:
+    await _db.execute("DELETE FROM cooldowns WHERE tg_id = ? AND game = ?", (tg_id, key))
+    await _db.commit()
+
+
+async def expired_statuses(key: str, now_iso: str) -> list[int]:
+    """Кому пора снять статус `key` (срок вышел, но запись ещё есть)."""
+    cur = await _db.execute(
+        "SELECT tg_id FROM cooldowns WHERE game = ? AND used_at <= ?", (key, now_iso)
+    )
+    return [r[0] for r in await cur.fetchall()]
+
+
 async def get_cooldown(tg_id: int, game: str) -> str | None:
     cur = await _db.execute(
         "SELECT used_at FROM cooldowns WHERE tg_id = ? AND game = ?", (tg_id, game)
@@ -443,6 +543,15 @@ async def random_target(exclude_tg_id: int) -> tuple | None:
         (exclude_tg_id,),
     )
     return await cur.fetchone()
+
+
+async def list_other_profiles(exclude_tg_id: int) -> list[tuple]:
+    """Все другие игроки: [(tg_id, nick, zbucks)]."""
+    cur = await _db.execute(
+        "SELECT tg_id, nick, zbucks FROM profiles WHERE tg_id != ? ORDER BY nick",
+        (exclude_tg_id,),
+    )
+    return await cur.fetchall()
 
 
 async def set_theft_cooldown(tg_id: int, hours: float) -> None:
