@@ -105,6 +105,7 @@ async def goat_round2(cb: CallbackQuery):
 
     # успех — +50 и только теперь раунд 3
     await storage.add_zbucks(tg_id, 50)
+    await storage.bump(tg_id, "goat_milked")
     round3 = await _round3(tg_id)
     await cb.message.edit_text(
         f"{goat.success(opt)}\n\n💰 +50 Z\n\n———\n{round3}", reply_markup=back_menu(owner)

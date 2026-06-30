@@ -108,7 +108,7 @@ async def thief_steal(cb: CallbackQuery, bot: Bot):
     target = await storage.random_target(tg_id)
     if not target:
         return await cb.answer("Грабить некого — на районе пусто 🤷", show_alert=True)
-    _, t_nick, t_wealth = target
+    t_id, t_nick, t_wealth = target
     thief = hlink(cb.from_user.full_name, f"tg://user?id={tg_id}")
     back = _back(tg_id, "menu:work")
 
@@ -133,6 +133,7 @@ async def thief_steal(cb: CallbackQuery, bot: Bot):
     amount = steal_amount(quality, t_wealth)
     await storage.add_zbucks(tg_id, amount)
     await storage.add_theft(tg_id)
+    await storage.bump(t_id, "robbed")
     await storage.set_theft_cooldown(tg_id, 12)
     await cb.message.edit_text(
         f"<b>{txt.QUALITY_NAMES[quality]}</b>\n\n{txt.success(quality, t_nick, amount)}",

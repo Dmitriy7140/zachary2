@@ -67,6 +67,7 @@ async def _tick(bot: Bot) -> None:
     for did, borrower_id, lender_nick, amount in await storage.debts_to_default(cutoff):
         await storage.mark_debt_defaulted(did)
         if not await is_chepushila(borrower_id):
+            await storage.bump(borrower_id, "defaulted")
             await storage.set_cooldown_until(
                 borrower_id, CHEPUSHILA_KEY, (now + timedelta(days=CHEPUSHILA_DAYS)).isoformat())
             who = await _mention(borrower_id)

@@ -90,6 +90,14 @@ async def init() -> None:
             created_at  TEXT,
             defaulted   INTEGER DEFAULT 0
         );
+
+        -- статистика (счётчики и суммы по игрокам)
+        CREATE TABLE IF NOT EXISTS stats (
+            tg_id INTEGER,
+            key   TEXT,
+            value INTEGER DEFAULT 0,
+            PRIMARY KEY (tg_id, key)
+        );
         """
     )
     # миграции для уже существующей БД
@@ -487,6 +495,40 @@ async def expired_statuses(key: str, now_iso: str) -> list[int]:
         "SELECT tg_id FROM cooldowns WHERE game = ? AND used_at <= ?", (key, now_iso)
     )
     return [r[0] for r in await cur.fetchall()]
+
+
+# --- статистика ---
+
+async def bump(tg_id: int, key: str, amount: int = 1) -> None:
+    await _db.execute(
+        """INSERT INTO stats (tg_id, key, value) VALUES (?, ?, ?)
+           ON CONFLICT (tg_id, key) DO UPDATE SET value = value + excluded.value""",
+        (tg_id, key, amount),
+    )
+    await _db.commit()
+
+
+async def stat_sum(key: str) -> int:
+    cur = await _db.execute("SELECT COALESCE(SUM(value), 0) FROM stats WHERE key = ?", (key,))
+    return (await cur.fetchone())[0]
+
+
+async def stat_top(key: str) -> tuple | None:
+    """Лидер по ключу: (nick, value) или None."""
+    cur = await _db.execute(
+        """SELECT p.nick, s.value FROM stats s JOIN profiles p ON p.tg_id = s.tg_id
+           WHERE s.key = ? AND s.value > 0 ORDER BY s.value DESC LIMIT 1""",
+        (key,),
+    )
+    return await cur.fetchone()
+
+
+async def player_stat(tg_id: int, key: str) -> int:
+    cur = await _db.execute(
+        "SELECT value FROM stats WHERE tg_id = ? AND key = ?", (tg_id, key)
+    )
+    row = await cur.fetchone()
+    return row[0] if row else 0
 
 
 async def get_cooldown(tg_id: int, game: str) -> str | None:

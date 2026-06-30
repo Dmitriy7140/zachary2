@@ -12,7 +12,7 @@ from game.daily import run_daily_scheduler
 from game.debts import run_debts_scheduler
 from game.market import run_market_scheduler
 from handlers import (admin, bets, companion, inventory, loan, market, minigames, pranks,
-                      registration, roulette, shop, vovka, work)
+                      registration, roulette, shop, stats, vovka, work)
 from mc.poller import run_poller
 
 logging.basicConfig(
@@ -30,6 +30,7 @@ async def main() -> None:
     bot = Bot(config.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
     dp.include_router(admin.router)
+    dp.include_router(stats.router)
     dp.include_router(registration.router)
     dp.include_router(minigames.router)
     dp.include_router(vovka.router)

@@ -30,6 +30,7 @@ async def _process_due(bot: Bot) -> None:
     for lid, tg_id, item, price in await storage.due_listings(datetime.now().isoformat()):
         await storage.remove_listing(lid)
         await storage.add_zbucks(tg_id, price)
+        await storage.bump(tg_id, f"sold_{item}")
         it = ITEMS.get(item)
         label = f"{it.emoji} {it.name}" if it else item
 

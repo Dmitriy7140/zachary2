@@ -160,6 +160,7 @@ async def loan_yes(cb: CallbackQuery, bot: Bot):
 
     await storage.add_debt(borrower_id, lender_id, cb.from_user.full_name, amount,
                            datetime.now().isoformat())
+    await storage.bump(borrower_id, "borrowed")
     await schedule_first_nag(borrower_id)
 
     await cb.message.edit_text(f"✅ Ты дал в долг <b>{amount} Z</b>.")

@@ -113,9 +113,11 @@ async def roulette_bet(msg: Message, state: FSMContext, bot: Bot):
     if wheel == data["color"]:
         payout = int(bet * MULT[data["color"]])
         await storage.add_zbucks(tg_id, payout)
+        await storage.bump(tg_id, "casino_won", payout - bet)
         line = f"Выпало {emoji} <b>{name}</b> — угадал! 🎉\nСтавка {bet} → <b>{payout} Z</b>"
         await announce(bot, casino.win_msg(mention, payout))
     else:
+        await storage.bump(tg_id, "casino_lost", bet)
         line = f"Выпало {emoji} <b>{name}</b> — мимо 💀\nСтавка {bet} Z сгорела (ты ставил на {bet_emoji})"
         await announce(bot, casino.loss_msg(mention, bet))
 

@@ -202,6 +202,7 @@ async def _finish(bot: Bot, tg_id: int) -> None:
     reward = wins * WIN_REWARD if wins >= WIN_THRESHOLD else 0
     if reward:
         await storage.add_zbucks(tg_id, reward)
+        await storage.bump(tg_id, "vovka_won", reward)
 
     if reward:
         text = (f"🥊 Игра окончена!\nПобед: <b>{wins}/{ROUNDS}</b>\n"
