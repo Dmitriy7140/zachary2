@@ -11,6 +11,7 @@ from game.bets import run_bets_scheduler
 from game.daily import run_daily_scheduler
 from game.debts import run_debts_scheduler
 from game.market import run_market_scheduler
+from game.richest import run_richest_watcher
 from handlers import (admin, bets, companion, inventory, loan, market, minigames, pranks,
                       registration, roulette, shop, stats, vovka, work)
 from mc.poller import run_poller
@@ -52,6 +53,7 @@ async def main() -> None:
     market_task = asyncio.create_task(run_market_scheduler(bot))
     bets_task = asyncio.create_task(run_bets_scheduler(bot))
     debts_task = asyncio.create_task(run_debts_scheduler(bot))
+    richest_task = asyncio.create_task(run_richest_watcher(bot))
 
     logging.info("Бот запущен")
     try:
@@ -62,6 +64,7 @@ async def main() -> None:
         market_task.cancel()
         bets_task.cancel()
         debts_task.cancel()
+        richest_task.cancel()
 
 
 if __name__ == "__main__":

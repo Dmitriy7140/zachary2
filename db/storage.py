@@ -98,6 +98,12 @@ async def init() -> None:
             value INTEGER DEFAULT 0,
             PRIMARY KEY (tg_id, key)
         );
+
+        -- произвольные мета-значения (напр. текущий богач)
+        CREATE TABLE IF NOT EXISTS meta (
+            key   TEXT PRIMARY KEY,
+            value TEXT
+        );
         """
     )
     # миграции для уже существующей БД
@@ -529,6 +535,30 @@ async def player_stat(tg_id: int, key: str) -> int:
     )
     row = await cur.fetchone()
     return row[0] if row else 0
+
+
+# --- мета / богатейший ---
+
+async def get_meta(key: str) -> str | None:
+    cur = await _db.execute("SELECT value FROM meta WHERE key = ?", (key,))
+    row = await cur.fetchone()
+    return row[0] if row else None
+
+
+async def set_meta(key: str, value: str) -> None:
+    await _db.execute(
+        "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+        (key, value),
+    )
+    await _db.commit()
+
+
+async def richest_player() -> tuple | None:
+    """(tg_id, nick, zbucks) с наибольшим балансом."""
+    cur = await _db.execute(
+        "SELECT tg_id, nick, zbucks FROM profiles ORDER BY zbucks DESC, tg_id ASC LIMIT 1"
+    )
+    return await cur.fetchone()
 
 
 async def get_cooldown(tg_id: int, game: str) -> str | None:
