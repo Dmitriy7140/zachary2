@@ -10,10 +10,11 @@ from db import storage
 from game.bets import run_bets_scheduler
 from game.daily import run_daily_scheduler
 from game.debts import run_debts_scheduler
+from game.fishing import run_fishing_scheduler
 from game.market import run_market_scheduler
 from game.richest import run_richest_watcher
-from handlers import (admin, bets, cashier, companion, inventory, loan, market, minigames, pranks,
-                      registration, roulette, shop, stats, vovka, work)
+from handlers import (admin, bets, cashier, companion, fishing, inventory, loan, market, minigames,
+                      pranks, registration, roulette, shop, stats, vovka, work)
 from mc.poller import run_poller
 
 logging.basicConfig(
@@ -36,6 +37,7 @@ async def main() -> None:
     dp.include_router(minigames.router)
     dp.include_router(vovka.router)
     dp.include_router(roulette.router)
+    dp.include_router(fishing.router)
     dp.include_router(shop.router)
     dp.include_router(inventory.router)
     dp.include_router(work.router)
@@ -55,6 +57,7 @@ async def main() -> None:
     bets_task = asyncio.create_task(run_bets_scheduler(bot))
     debts_task = asyncio.create_task(run_debts_scheduler(bot))
     richest_task = asyncio.create_task(run_richest_watcher(bot))
+    fishing_task = asyncio.create_task(run_fishing_scheduler(bot))
 
     logging.info("Бот запущен")
     try:
@@ -66,6 +69,7 @@ async def main() -> None:
         bets_task.cancel()
         debts_task.cancel()
         richest_task.cancel()
+        fishing_task.cancel()
 
 
 if __name__ == "__main__":

@@ -3,10 +3,20 @@ from aiogram import F, Router
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 
 from db import storage
+from game.fishing import BAIT_TIER, fishing_level
 from game.items import ITEMS, shop_items
 from utils.guards import ensure_owner, with_owner
 
 router = Router()
+
+
+async def _bait_locked(tg_id: int, key: str) -> int:
+    """Если приманка не по уровню — вернуть нужный уровень, иначе 0."""
+    tier = BAIT_TIER.get(key)
+    if not tier:
+        return 0
+    lvl = fishing_level(await storage.player_stat(tg_id, "fish_caught"))
+    return tier if lvl < tier else 0
 
 
 async def _render(message, owner: int) -> None:
@@ -14,7 +24,11 @@ async def _render(message, owner: int) -> None:
     rows = []
     for it in shop_items():
         owned = await storage.get_item_qty(owner, it.key)
-        if owned >= it.max_qty:
+        need = await _bait_locked(owner, it.key)
+        if need:
+            rows.append([InlineKeyboardButton(text=f"🔒 {it.name} — нужен ур. рыбалки {need}",
+                                              callback_data="noop")])
+        elif owned >= it.max_qty:
             rows.append([InlineKeyboardButton(text=f"{it.emoji} {it.name} — куплено ✅",
                                               callback_data="noop")])
         else:
@@ -51,6 +65,9 @@ async def shop_buy(cb: CallbackQuery):
     item = ITEMS.get(key)
     if not item or item.price is None:
         return await cb.answer("Нет такого товара", show_alert=True)
+    need = await _bait_locked(tg_id, key)
+    if need:
+        return await cb.answer(f"🔒 Нужен уровень рыбалки {need} — сначала налови рыбы", show_alert=True)
     if await storage.get_item_qty(tg_id, key) >= item.max_qty:
         return await cb.answer("Уже куплено 😉", show_alert=True)
     if not await storage.spend_zbucks(tg_id, item.price):

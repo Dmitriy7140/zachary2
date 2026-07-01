@@ -104,6 +104,14 @@ async def init() -> None:
             key   TEXT PRIMARY KEY,
             value TEXT
         );
+
+        -- закинутые удочки (рыбалка)
+        CREATE TABLE IF NOT EXISTS fishing (
+            id        INTEGER PRIMARY KEY AUTOINCREMENT,
+            tg_id     INTEGER,
+            bait_tier INTEGER,
+            catch_at  TEXT
+        );
         """
     )
     # миграции для уже существующей БД
@@ -559,6 +567,46 @@ async def richest_player() -> tuple | None:
         "SELECT tg_id, nick, zbucks FROM profiles ORDER BY zbucks DESC, tg_id ASC LIMIT 1"
     )
     return await cur.fetchone()
+
+
+async def item_owners(item: str, exclude_tg_id: int) -> list[tuple]:
+    """Другие игроки, у кого есть предмет: [(tg_id, nick)]."""
+    cur = await _db.execute(
+        """SELECT i.tg_id, p.nick FROM inventory i JOIN profiles p ON p.tg_id = i.tg_id
+           WHERE i.item = ? AND i.qty > 0 AND i.tg_id != ? ORDER BY p.nick""",
+        (item, exclude_tg_id),
+    )
+    return await cur.fetchall()
+
+
+# --- рыбалка ---
+
+async def cast_rod(tg_id: int, bait_tier: int, catch_at: str) -> None:
+    await _db.execute(
+        "INSERT INTO fishing (tg_id, bait_tier, catch_at) VALUES (?, ?, ?)",
+        (tg_id, bait_tier, catch_at),
+    )
+    await _db.commit()
+
+
+async def active_cast(tg_id: int) -> tuple | None:
+    """(bait_tier, catch_at) активной удочки или None."""
+    cur = await _db.execute(
+        "SELECT bait_tier, catch_at FROM fishing WHERE tg_id = ? ORDER BY id LIMIT 1", (tg_id,)
+    )
+    return await cur.fetchone()
+
+
+async def due_casts(now_iso: str) -> list[tuple]:
+    cur = await _db.execute(
+        "SELECT id, tg_id, bait_tier FROM fishing WHERE catch_at <= ?", (now_iso,)
+    )
+    return await cur.fetchall()
+
+
+async def remove_cast(cast_id: int) -> None:
+    await _db.execute("DELETE FROM fishing WHERE id = ?", (cast_id,))
+    await _db.commit()
 
 
 async def get_cooldown(tg_id: int, game: str) -> str | None:

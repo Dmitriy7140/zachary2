@@ -32,9 +32,10 @@ async def games_menu(cb: CallbackQuery):
         return await cb.answer("Сначала зарегистрируйся 😉", show_alert=True)
     rows = [
         [InlineKeyboardButton(text="🐐 Подоить козу", callback_data=with_owner("goat:start", owner))],
-        # «Бей Вовку» и «Рулетка» — только в личке, без owner (gated через ensure_private)
+        # «Бей Вовку» / «Рулетка» / «Рыбалка» — только в личке, без owner (ensure_private)
         [InlineKeyboardButton(text="🥊 Бей Вовку", callback_data="vovka:start")],
         [InlineKeyboardButton(text="🎰 Рулетка", callback_data="roulette:start")],
+        [InlineKeyboardButton(text="🎣 Рыбалка", callback_data="fishing:start")],
         [InlineKeyboardButton(text="⬅️ В меню", callback_data=with_owner("menu:main", owner))],
     ]
     await cb.message.edit_text("🎲 <b>Мини-игры</b>\nВыбери забаву:", reply_markup=_kb(rows))
@@ -75,17 +76,17 @@ async def goat_round1(cb: CallbackQuery):
     if not await ensure_owner(cb):
         return
     owner = tg_id = cb.from_user.id
-    await storage.add_zbucks(tg_id, 20)
+    await storage.add_zbucks(tg_id, 10)
 
     if random.random() < 0.5:  # неверная титька — игра заканчивается
-        await cb.message.edit_text(f"{goat.pasha()}\n\n💰 +20 Z", reply_markup=back_menu(owner))
+        await cb.message.edit_text(f"{goat.pasha()}\n\n💰 +10 Z", reply_markup=back_menu(owner))
         return await cb.answer()
 
     # верная титька — раунд 2
     rows = [[InlineKeyboardButton(text=goat.OPTION_LABELS[o],
                                   callback_data=with_owner(f"goat:r2:{o}", owner))]
             for o in ("1", "2", "3")]
-    await cb.message.edit_text(f"💰 +20 Z\n\n{goat.ROUND2_INTRO}", reply_markup=_kb(rows))
+    await cb.message.edit_text(f"💰 +10 Z\n\n{goat.ROUND2_INTRO}", reply_markup=_kb(rows))
     await cb.answer()
 
 
@@ -99,16 +100,16 @@ async def goat_round2(cb: CallbackQuery):
 
     if random.random() >= goat.SUCCESS_CHANCE.get(opt, 0):
         # провал — игра заканчивается, третьего раунда нет
-        await storage.add_zbucks(tg_id, 10)
-        await cb.message.edit_text(f"{goat.FAIL[opt]}\n\n💰 +10 Z", reply_markup=back_menu(owner))
+        await storage.add_zbucks(tg_id, 5)
+        await cb.message.edit_text(f"{goat.FAIL[opt]}\n\n💰 +5 Z", reply_markup=back_menu(owner))
         return await cb.answer()
 
-    # успех — +50 и только теперь раунд 3
-    await storage.add_zbucks(tg_id, 50)
+    # успех — +25 и только теперь раунд 3
+    await storage.add_zbucks(tg_id, 25)
     await storage.bump(tg_id, "goat_milked")
     round3 = await _round3(tg_id)
     await cb.message.edit_text(
-        f"{goat.success(opt)}\n\n💰 +50 Z\n\n———\n{round3}", reply_markup=back_menu(owner)
+        f"{goat.success(opt)}\n\n💰 +25 Z\n\n———\n{round3}", reply_markup=back_menu(owner)
     )
     await cb.answer()
     mention = hlink(cb.from_user.full_name, f"tg://user?id={tg_id}")
@@ -120,9 +121,9 @@ async def _round3(tg_id: int) -> str:
     if await storage.get_item_qty(tg_id, "bucket") > 0:
         cans = await storage.get_item_qty(tg_id, "milk_can")
         if cans >= ITEMS["milk_can"].max_qty:
-            await storage.add_zbucks(tg_id, 20)
-            return f"{goat.ROUND3_BUCKET_FULL}\n💰 +20 Z"
+            await storage.add_zbucks(tg_id, 10)
+            return f"{goat.ROUND3_BUCKET_FULL}\n💰 +10 Z"
         await storage.add_item(tg_id, "milk_can", 1, ITEMS["milk_can"].max_qty)
         return goat.ROUND3_BUCKET
-    await storage.add_zbucks(tg_id, 20)
-    return f"{goat.ROUND3_NO_BUCKET}\n💰 +20 Z"
+    await storage.add_zbucks(tg_id, 10)
+    return f"{goat.ROUND3_NO_BUCKET}\n💰 +10 Z"
