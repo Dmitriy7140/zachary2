@@ -1,11 +1,14 @@
 """Магазин: покупка предметов за Zbucks."""
 from aiogram import F, Router
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.utils.markdown import hlink
 
+from content.zhmyzhko import proletarian
 from db import storage
 from game.fishing import BAIT_TIER, fishing_level
 from game.items import ITEMS, shop_items
 from utils.guards import ensure_owner, with_owner
+from utils.notify import announce
 
 router = Router()
 
@@ -57,7 +60,7 @@ async def noop(cb: CallbackQuery):
 
 
 @router.callback_query(F.data.startswith("shop:buy:"))
-async def shop_buy(cb: CallbackQuery):
+async def shop_buy(cb: CallbackQuery, bot):
     if not await ensure_owner(cb):
         return
     tg_id = cb.from_user.id
@@ -74,4 +77,6 @@ async def shop_buy(cb: CallbackQuery):
         return await cb.answer("Не хватает Z 💸", show_alert=True)
     await storage.add_item(tg_id, key, 1, item.max_qty)
     await cb.answer(f"Куплено: {item.emoji} {item.name}!", show_alert=True)
+    buyer = hlink(cb.from_user.full_name, f"tg://user?id={tg_id}")
+    await announce(bot, f"🛒 {buyer} купил {item.emoji} {item.name} за {item.price} Z.\n{proletarian()}")
     await _render(cb.message, tg_id)

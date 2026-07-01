@@ -6,6 +6,7 @@ from datetime import datetime
 from aiogram import Bot
 from aiogram.utils.markdown import hlink
 
+from content.zhmyzhko import proletarian
 from db import storage
 from game.items import ITEMS
 from utils.notify import announce
@@ -42,4 +43,4 @@ async def _process_due(bot: Bot) -> None:
         profile = await storage.get_profile(tg_id)
         nick = profile[2] if profile else "Игрок"
         seller = hlink(nick, f"tg://user?id={tg_id}")
-        await announce(bot, f"🏪 {seller} продал {label} за {price} Z на рынке.")
+        await announce(bot, f"🏪 {seller} продал {label} за {price} Z на рынке.\n{proletarian()}")

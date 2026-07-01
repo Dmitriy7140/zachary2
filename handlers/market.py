@@ -7,6 +7,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from aiogram.utils.markdown import hlink
 
+from content.zhmyzhko import proletarian
 from db import storage
 from game.items import ITEMS, sellable_items
 from utils.guards import ensure_private, with_owner
@@ -121,7 +122,8 @@ async def market_price(msg: Message, state: FSMContext, bot: Bot):
         await storage.add_zbucks(tg_id, price)
         await storage.bump(tg_id, f"sold_{it.key}")
         nick = (await storage.get_profile(tg_id))[2]
-        await announce(bot, f"🏪 {hlink(nick, f'tg://user?id={tg_id}')} продал {it.emoji} {it.name} за {price} Z.")
+        await announce(bot, f"🏪 {hlink(nick, f'tg://user?id={tg_id}')} продал {it.emoji} {it.name} "
+                            f"за {price} Z.\n{proletarian()}")
         return await finish(f"🏪 {it.emoji} {it.name} продан моментально за <b>{price} Z</b>!")
 
     sell_at = (datetime.now() + timedelta(minutes=minutes)).isoformat()
