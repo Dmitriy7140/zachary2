@@ -31,6 +31,13 @@ ZAHAR_NBT = (
 # Пиллагер «Злой Захар»: враждебен по умолчанию, агрится на ближайшего игрока.
 RAID_NBT = '{CustomName:\'{"text":"Злой Захар"}\',CustomNameVisible:1b,PersistenceRequired:1b}'
 
+# Лавелас Пан Жмыжко — житель-нитвит, просто ходит и очаровывает.
+ZHMYZHKO_NBT = (
+    '{CustomName:\'{"text":"Пан Жмыжко"}\',CustomNameVisible:1b,'
+    'VillagerData:{profession:"minecraft:nitwit",type:"minecraft:plains",level:1},'
+    'PersistenceRequired:1b}'
+)
+
 
 # Тексты-открытки на экран для «Написать письмо»
 TITLE_PHRASES = [
@@ -145,6 +152,15 @@ PRANKS: dict[str, Prank] = {
             "{buyer} устроил {victim} тёплую встречу: 15 разъярённых Захаров открыли огонь.",
         ),
     ),
+    "zhmyzhko": Prank(
+        "zhmyzhko", "Подослать Жмыжко", 40, "summon",
+        entity="minecraft:villager", nbt=ZHMYZHKO_NBT, count=1,
+        messages=(
+            "🎩 {buyer} подослал к {victim} лавеласа Пана Жмыжко — тот уже крутит ус и ищет, кого очаровать.",
+            "К {victim} заявился Пан Жмыжко от {buyer}. Дамы в радиусе 50 блоков в опасности.",
+            "{buyer} прислал {victim} гостя — неотразимого Пана Жмыжко. Прячьте жён и кассирш.",
+        ),
+    ),
 }
 
 
@@ -162,6 +178,7 @@ PRANK_EMOJI = {
     "lightning": "⚡",
     "zahar": "🧑‍🌾",
     "zahar_raid": "🏹",
+    "zhmyzhko": "🎩",
 }
 
 

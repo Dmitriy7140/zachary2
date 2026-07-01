@@ -15,7 +15,7 @@ from utils.notify import announce
 
 router = Router()
 
-GOAT_COOLDOWN = timedelta(hours=12)
+GOAT_COOLDOWN = timedelta(hours=1)
 
 
 def _kb(rows) -> InlineKeyboardMarkup:

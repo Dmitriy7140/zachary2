@@ -12,7 +12,7 @@ from game.daily import run_daily_scheduler
 from game.debts import run_debts_scheduler
 from game.market import run_market_scheduler
 from game.richest import run_richest_watcher
-from handlers import (admin, bets, companion, inventory, loan, market, minigames, pranks,
+from handlers import (admin, bets, cashier, companion, inventory, loan, market, minigames, pranks,
                       registration, roulette, shop, stats, vovka, work)
 from mc.poller import run_poller
 
@@ -39,6 +39,7 @@ async def main() -> None:
     dp.include_router(shop.router)
     dp.include_router(inventory.router)
     dp.include_router(work.router)
+    dp.include_router(cashier.router)
     dp.include_router(market.router)
     dp.include_router(bets.router)
     dp.include_router(loan.router)

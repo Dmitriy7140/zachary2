@@ -5,6 +5,7 @@ from aiogram.utils.markdown import hlink
 
 from content import thief as txt
 from db import storage
+from game.cashier import level_name as cashier_level_name
 from game.debts import chepushila_days_left, is_chepushila
 from game.thief import (MIN_TARGET_WEALTH, THEFT_THRESHOLDS, is_fail, roll_quality,
                         steal_amount, thief_level)
@@ -31,10 +32,12 @@ async def work_menu(cb: CallbackQuery):
         return await cb.answer("Сначала зарегистрируйся 😉", show_alert=True)
 
     level = thief_level(await storage.get_thefts(owner))
+    cgames = await storage.player_stat(owner, "cashier_games")
     lines = [
         "💼 <b>Работа</b>",
         "",
         "<b>Текущие ранги:</b>",
+        f"🛒 Кассир — {cashier_level_name(cgames)}",
         f"🦹 Вор — {txt.LEVEL_NAMES[level - 1]}",
     ]
     rows = [
@@ -58,9 +61,16 @@ async def work_legal(cb: CallbackQuery):
             reply_markup=_back(owner, "menu:work"),
         )
         return await cb.answer()
+
+    cgames = await storage.player_stat(owner, "cashier_games")
+    rows = [
+        [InlineKeyboardButton(text="🛒 Кассир — на смену", callback_data="cashier:start")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=with_owner("menu:work", owner))],
+    ]
     await cb.message.edit_text(
-        "✅ <b>Легальная работа</b>\nПока вакансий нет — скоро завезём 🛠",
-        reply_markup=_back(owner, "menu:work"),
+        f"✅ <b>Легальная работа</b>\n\n🛒 Кассир — ранг: <b>{cashier_level_name(cgames)}</b> "
+        f"(смен: {cgames})\nИгра раз в 30 мин.",
+        reply_markup=_kb(rows),
     )
     await cb.answer()
 
