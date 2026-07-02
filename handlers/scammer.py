@@ -51,10 +51,10 @@ async def scammer_start(cb: CallbackQuery, state: FSMContext, bot: Bot):
     await _next_round(bot, tg_id, state)
 
 
-async def _edit(bot: Bot, g: dict, text: str, markup=None) -> None:
+async def _say(bot: Bot, g: dict, text: str, markup=None) -> None:
+    # шлём НОВОЕ сообщение (не редактируем старое — оно улетает вверх)
     try:
-        await bot.edit_message_text(text, chat_id=g["chat_id"], message_id=g["msg_id"],
-                                    reply_markup=markup)
+        await bot.send_message(g["chat_id"], text, reply_markup=markup)
     except Exception:
         pass
 
@@ -72,7 +72,7 @@ async def _next_round(bot: Bot, tg_id: int, state: FSMContext, prefix: str = "")
     g["best"] = None
     g["attempts"] = ATTEMPTS
     await state.set_state(ScamStates.attempt)
-    await _edit(bot, g,
+    await _say(bot, g,
                 f"{prefix}📞 Раунд {rnd}/{ROUNDS}\nЗвонишь: <b>{character}</b>\n"
                 f"Убеди его — напиши сообщение. Угадай нужное число слов.\n"
                 f"Попыток: {ATTEMPTS}.")
@@ -100,7 +100,7 @@ async def scam_attempt(msg: Message, state: FSMContext, bot: Bot):
     g["best"] = diff if g["best"] is None else min(g["best"], diff)
     g["attempts"] -= 1
     if g["attempts"] > 0:
-        return await _edit(bot, g,
+        return await _say(bot, g,
                            f"📞 <b>{character}</b>\nТы написал: {count} слов.\n"
                            f"{hint(count, target, character)}\nПопыток осталось: {g['attempts']}.")
 
@@ -122,7 +122,7 @@ async def _finish(bot: Bot, tg_id: int, state: FSMContext, prefix: str = "") -> 
     if score:
         await storage.add_zbucks(tg_id, score)
         await storage.bump(tg_id, "scam_won", score)
-    await _edit(bot, g, f"{prefix}📞 <b>Обзвон окончен!</b>\nНаварил: <b>{score} Z</b>",
+    await _say(bot, g, f"{prefix}📞 <b>Обзвон окончен!</b>\nНаварил: <b>{score} Z</b>",
                 back_menu(tg_id))
     mention = hlink(g["name"], f"tg://user?id={tg_id}")
     await announce(bot, f"📞 {mention} обзвонил доверчивых граждан и наварил {score} Z.")
