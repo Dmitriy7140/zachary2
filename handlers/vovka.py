@@ -25,7 +25,7 @@ WIN_REWARD = 5
 WIN_THRESHOLD = 3
 COST = 0
 COOLDOWN = timedelta(seconds=3)
-ROUND_TIME = 2   # сек на реакцию (бездействие = проигрыш раунда)
+ROUND_TIME = 5   # сек на реакцию (бездействие = проигрыш раунда)
 GAP = 2          # сек между раундами
 
 BALD = "👨‍🦲"
@@ -124,7 +124,7 @@ async def _start_round(bot: Bot, tg_id: int) -> None:
 
     sent = await bot.send_message(
         state["chat_id"],
-        f"🥊 Раунд {rnd}/{ROUNDS} — бей Вовку (лысого {BALD})! ⏱ 2 сек",
+        f"🥊 Раунд {rnd}/{ROUNDS} — бей Вовку (лысого {BALD})! ⏱ {ROUND_TIME} сек",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
     )
     state["msg_id"] = sent.message_id

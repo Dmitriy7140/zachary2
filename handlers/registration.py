@@ -1,6 +1,9 @@
-"""Регистрация: игрок жмёт кнопку -> заявка тебе в личку -> подтверждение."""
+"""Регистрация: заявка (кнопка в треде ИЛИ /register) -> подтверждение админом."""
 from aiogram import Bot, F, Router
-from aiogram.types import CallbackQuery
+from aiogram.filters import Command, CommandObject
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import CallbackQuery, Message
 from aiogram.utils.markdown import hlink
 
 from config import config
@@ -8,6 +11,52 @@ from db import storage
 from keyboards import approve_kb
 
 router = Router()
+
+
+class RegStates(StatesGroup):
+    nick = State()
+
+
+def _valid_nick(nick: str) -> bool:
+    return bool(nick) and len(nick) <= 16 and all(c.isalnum() or c == "_" for c in nick)
+
+
+@router.message(Command("register", "link"))
+async def cmd_register(msg: Message, command: CommandObject, state: FSMContext, bot: Bot):
+    """Привязать ник, не заходя на сервер. /register [ник] или интерактивно."""
+    if await storage.get_profile(msg.from_user.id):
+        return await msg.answer("У тебя уже есть профиль 😉 Жми /start.")
+    nick = (command.args or "").strip()
+    if nick:
+        return await _submit(msg, nick, bot)
+    await state.set_state(RegStates.nick)
+    await msg.answer("Как тебя зовут в Minecraft? Напиши свой ник одним сообщением 👇")
+
+
+@router.message(RegStates.nick)
+async def reg_nick(msg: Message, state: FSMContext, bot: Bot):
+    await state.clear()
+    nick = (msg.text or "").strip()
+    if nick.startswith("/"):
+        return await msg.answer("Отменено. Напиши /register, когда будешь готов.")
+    await _submit(msg, nick, bot)
+
+
+async def _submit(msg: Message, nick: str, bot: Bot) -> None:
+    if not _valid_nick(nick):
+        return await msg.answer(
+            "Ник какой-то неправильный (буквы, цифры, _, до 16 символов). "
+            "Попробуй заново: /register"
+        )
+    if await storage.get_profile(msg.from_user.id):
+        return await msg.answer("У тебя уже есть профиль 😉")
+    link = hlink(str(msg.from_user.id), f"tg://user?id={msg.from_user.id}")
+    await bot.send_message(
+        config.admin_id,
+        f"Зарегистрировать пользователя {link} как <b>{nick}</b>? (заявка через /register)",
+        reply_markup=approve_kb(msg.from_user.id, nick),
+    )
+    await msg.answer(f"📨 Заявка на ник <b>{nick}</b> отправлена. Жди подтверждения 🙌")
 
 
 @router.callback_query(F.data.startswith("reg:"))

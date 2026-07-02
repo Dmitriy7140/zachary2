@@ -19,7 +19,7 @@ def thief_level(thefts: int) -> int:
 
 
 def fail_chance(level: int) -> int:
-    return max(0, 60 - 10 * (level - 1))
+    return max(0, 50 - 10 * (level - 1))
 
 
 def is_fail(level: int) -> bool:

@@ -66,7 +66,8 @@ async def start(msg: Message):
     if not profile:
         await msg.answer(
             "Привет! Профиля в <b>ZakharCompanion</b> у тебя пока нет.\n"
-            "Зайди на сервер и зарегистрируйся через приветствие в канале 😉"
+            "Привяжи ник командой /register — или зайди на сервер "
+            "и зарегистрируйся через приветствие в канале 😉"
         )
         return
     await msg.answer(await _profile_card(profile), reply_markup=main_menu(msg.from_user.id))
