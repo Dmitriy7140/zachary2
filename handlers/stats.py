@@ -34,6 +34,7 @@ async def allstats(msg: Message):
         f"🐐 Раз подоили козу: <b>{await storage.stat_sum('goat_milked')}</b>",
         f"🎣 Больше всех наловил рыбы: <b>{_top(await storage.stat_top('fish_caught'), ' шт')}</b>",
         f"🍑 Чаще всех совал айфон куда не надо: <b>{_top(await storage.stat_top('iphone_butt'), ' раз')}</b>",
+        f"📞 Больше всех наварил телефоном: <b>{_top(await storage.stat_top('scam_won'), ' Z')}</b>",
         f"🛒 Больше всего пикнул товаров: <b>{_top(await storage.stat_top('cashier_picks'), ' шт')}</b>",
         f"🤝 Сыграно ставок: <b>{bets_total}</b> "
         f"(больше всех выиграл: {_top(await storage.stat_top('bets_won'))})",
@@ -64,6 +65,7 @@ async def mystats(msg: Message):
         f"⭐ Уровень {level} ({rank(level)}) · 💰 {zbucks} Z",
         "",
         f"🦹 Удачных краж: <b>{thefts}</b> · обворовали тебя: <b>{await st('robbed')}</b>",
+        f"📞 Наварил телефоном: <b>{await st('scam_won')} Z</b>",
         f"🎰 Казино: проиграно <b>{await st('casino_lost')} Z</b>, в плюс <b>{await st('casino_won')} Z</b>",
         f"🤝 Ставки: <b>{b_won}</b> побед / <b>{b_lost}</b> поражений (<b>{b_pct}%</b> выигрыша)",
         f"🥊 «Бей Вовку»: заработано <b>{await st('vovka_won')} Z</b>",

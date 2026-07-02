@@ -96,6 +96,8 @@ async def work_illegal(cb: CallbackQuery):
 
     rows = [
         [InlineKeyboardButton(text="🦹 Залезть в карман", callback_data=with_owner("thief:steal", owner))],
+        # мошенник — только в личке (нужен ввод текста), без owner
+        [InlineKeyboardButton(text="📞 Телефонный мошенник", callback_data="scammer:start")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data=with_owner("menu:work", owner))],
     ]
     await cb.message.edit_text("\n".join(lines), reply_markup=_kb(rows))
