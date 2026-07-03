@@ -14,6 +14,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from aiogram.utils.markdown import hlink
 
 from db import storage
+from game.taxman import grant
 from keyboards import back_menu
 from utils.guards import ensure_private
 from utils.notify import announce
@@ -275,7 +276,7 @@ async def _finish(bot: Bot, tg_id: int) -> None:
     wins = state["wins"]
     reward = wins * WIN_REWARD if wins >= WIN_THRESHOLD else 0
     if reward:
-        await storage.add_zbucks(tg_id, reward)
+        await grant(bot, tg_id, reward)
         await storage.bump(tg_id, "vovka_won", reward)
 
     if reward:

@@ -10,6 +10,7 @@ from config import config
 from content.ranks import rank
 from db import storage
 from game.leveling import daily_xp, level_from_xp, xp_for_level, zbucks_for_level
+from game.taxman import maybe_gustav
 
 log = logging.getLogger(__name__)
 
@@ -48,6 +49,8 @@ async def process_day(bot: Bot, day: str, allowance: bool = True) -> None:
 
     blocks = []
     for tg_id, nick, xp, level in profiles:
+        profile = await storage.get_profile(tg_id)
+        old_balance = profile[3] if profile else 0
         if allowance:
             await storage.add_zbucks(tg_id, ALLOWANCE)  # пособие по инвалидности
         minutes = playtime.get(nick, 0) // 60
@@ -58,6 +61,10 @@ async def process_day(bot: Bot, day: str, allowance: bool = True) -> None:
             zbucks_for_level(lvl) for lvl in range(level + 1, new_level + 1)
         )
         await storage.apply_daily_xp(tg_id, new_xp, new_level, zbucks_gain)
+        # пособие/уровневые — легальный доход, но тысячу пересечь могут
+        gained_z = (ALLOWANCE if allowance else 0) + zbucks_gain
+        if gained_z:
+            await maybe_gustav(bot, tg_id, old_balance, old_balance + gained_z)
         blocks.append(
             _report_block(tg_id, nick, minutes, gained, level, new_level, new_xp, zbucks_gain)
         )

@@ -10,6 +10,7 @@ from content.courier import DIR_LABELS, PARABLES, bratan
 from db import storage
 from game.courier import (BIKE_REWARD, BRATAN_CHANCE, COOLDOWN_MIN, FOOT_REWARD, IPHONE_FAIL,
                           IPHONE_GLITCH, ROUNDS)
+from game.taxman import grant
 from keyboards import back_menu
 from utils.guards import ensure_private, with_owner
 from utils.notify import announce
@@ -141,7 +142,7 @@ async def _finish(bot: Bot, tg_id: int, prefix: str = "") -> None:
         return
     score = g["score"]
     if score:
-        await storage.add_zbucks(tg_id, score)
+        await grant(bot, tg_id, score)
         await storage.bump(tg_id, "courier_won", score)
     mode_name = "вело-курьером" if g["mode"] == "bike" else "пешим курьером"
     await _edit(bot, g, f"{prefix}🛵 <b>Смена окончена!</b>\nРаботал {mode_name}, "

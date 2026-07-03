@@ -11,6 +11,7 @@ from content.cashier import BAD, GOOD, zhmyzhko
 from db import storage
 from game.cashier import (COOLDOWN_MIN, GALYA_BONUS, GALYA_TIME, LEVEL_NAMES, OTMENA_CHANCE,
                           ROUNDS, ZHMYZHKO_CHANCE, level)
+from game.taxman import grant
 from keyboards import back_menu
 from utils.guards import ensure_private
 from utils.notify import announce
@@ -182,7 +183,7 @@ async def _finish(bot: Bot, tg_id: int) -> None:
         payout = int(payout * 1.1)  # бонус «Честного человека»
     picks = state["picks"]
     if payout:
-        await storage.add_zbucks(tg_id, payout)
+        await grant(bot, tg_id, payout)
         await storage.bump(tg_id, "cashier_won", payout)
     if picks:
         await storage.bump(tg_id, "cashier_picks", picks)

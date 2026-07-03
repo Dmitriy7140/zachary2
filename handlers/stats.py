@@ -42,6 +42,10 @@ async def allstats(msg: Message):
         f"(больше всех выиграл: {_top(await storage.stat_top('bets_won'))})",
         f"🤲 Чаще всего брал в долг: <b>{_top(await storage.stat_top('borrowed'), ' раз')}</b>",
         f"🤡 Главный чепушила: <b>{_top(await storage.stat_top('defaulted'), ' раз')}</b>",
+        f"🧾 Занесено Густаву Налоговику: <b>{await storage.stat_sum('gustav_paid')} Z</b> "
+        f"(щедрее всех: {_top(await storage.stat_top('gustav_paid'), ' Z')})",
+        f"🕵️ Чаще всех уходил от проверки Густава: "
+        f"<b>{_top(await storage.stat_top('gustav_evaded'), ' раз')}</b>",
     ]
     await msg.answer("\n".join(lines))
 
@@ -79,5 +83,7 @@ async def mystats(msg: Message):
         f"🐐 Доил козу: <b>{await st('goat_milked')}</b> раз",
         f"🤲 Брал в долг: <b>{await st('borrowed')}</b> раз",
         f"🤡 Был чепушилой: <b>{await st('defaulted')}</b> раз",
+        f"🧾 Грязных денег сейчас: <b>{await storage.get_dirty(tg_id)} Z</b> · "
+        f"занесено Густаву: <b>{await st('gustav_paid')} Z</b>",
     ]
     await msg.answer("\n".join(lines))

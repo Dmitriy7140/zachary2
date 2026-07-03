@@ -8,6 +8,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from config import config
 from db import storage
+from game.taxman import grant
 from utils.notify import announce
 
 log = logging.getLogger(__name__)
@@ -81,7 +82,8 @@ async def resolve_event(bot: Bot, eid: int, outcome: str) -> bool:
     else:
         share = losers_pool // len(winners)
         for tg_id, amount in winners:
-            await storage.add_zbucks(tg_id, amount + share)  # своя ставка + доля банка
+            # своя ставка + доля банка; выигрыш в споре — легальный
+            await grant(bot, tg_id, amount + share)
             await storage.bump(tg_id, "bets_won")
         for t, s, a in stakes:
             if s != outcome:

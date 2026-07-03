@@ -32,12 +32,17 @@ async def _profile_card(profile: tuple) -> str:
     here = xp - xp_for_level(level)              # опыт внутри текущего уровня
     need = xp_for_level(level + 1) - xp_for_level(level)  # цена следующего уровня
     flvl = fishing_level(await storage.player_stat(tg_id, "fish_caught"))
+    dirty = await storage.get_dirty(tg_id)
+    dirty_line = f"🧾 Из них грязные бабки: <b>{dirty} Z</b>"
+    if dirty:
+        dirty_line += " — холщовый еблет уже принюхивается"
     return (
         f"👤 <b>{nick}</b>\n"
         f"⭐ Уровень <b>{level}</b> — {rank(level)}\n"
         f"✨ Опыт: {here} / {need} (до уровня {level + 1})\n"
         f"🎣 Рыбалка: ур. <b>{flvl}</b>\n"
-        f"💰 Баланс: <b>{zbucks} Z</b>"
+        f"💰 Всего денег: <b>{zbucks} Z</b>\n"
+        f"{dirty_line}"
     )
 
 

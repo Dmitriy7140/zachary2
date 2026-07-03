@@ -9,6 +9,7 @@ from aiogram.utils.markdown import hlink
 from content import goat
 from db import storage
 from game.items import ITEMS
+from game.taxman import grant
 from keyboards import back_menu
 from utils.guards import ensure_owner, with_owner
 from utils.notify import announce
@@ -76,7 +77,7 @@ async def goat_round1(cb: CallbackQuery):
     if not await ensure_owner(cb):
         return
     owner = tg_id = cb.from_user.id
-    await storage.add_zbucks(tg_id, 10)
+    await grant(cb.bot, tg_id, 10)
 
     if random.random() < 0.5:  # неверная титька — игра заканчивается
         await cb.message.edit_text(f"{goat.pasha()}\n\n💰 +10 Z", reply_markup=back_menu(owner))
@@ -100,14 +101,14 @@ async def goat_round2(cb: CallbackQuery):
 
     if random.random() >= goat.SUCCESS_CHANCE.get(opt, 0):
         # провал — игра заканчивается, третьего раунда нет
-        await storage.add_zbucks(tg_id, 5)
+        await grant(cb.bot, tg_id, 5)
         await cb.message.edit_text(f"{goat.FAIL[opt]}\n\n💰 +5 Z", reply_markup=back_menu(owner))
         return await cb.answer()
 
     # успех — +25 и только теперь раунд 3
-    await storage.add_zbucks(tg_id, 25)
+    await grant(cb.bot, tg_id, 25)
     await storage.bump(tg_id, "goat_milked")
-    round3 = await _round3(tg_id)
+    round3 = await _round3(cb.bot, tg_id)
     await cb.message.edit_text(
         f"{goat.success(opt)}\n\n💰 +25 Z\n\n———\n{round3}", reply_markup=back_menu(owner)
     )
@@ -116,14 +117,14 @@ async def goat_round2(cb: CallbackQuery):
     await announce(cb.bot, f"🐐 {mention} успешно подоил козу 🥛")
 
 
-async def _round3(tg_id: int) -> str:
+async def _round3(bot, tg_id: int) -> str:
     """Третий раунд: зависит от наличия Ведра."""
     if await storage.get_item_qty(tg_id, "bucket") > 0:
         cans = await storage.get_item_qty(tg_id, "milk_can")
         if cans >= ITEMS["milk_can"].max_qty:
-            await storage.add_zbucks(tg_id, 10)
+            await grant(bot, tg_id, 10)
             return f"{goat.ROUND3_BUCKET_FULL}\n💰 +10 Z"
         await storage.add_item(tg_id, "milk_can", 1, ITEMS["milk_can"].max_qty)
         return goat.ROUND3_BUCKET
-    await storage.add_zbucks(tg_id, 10)
+    await grant(bot, tg_id, 10)
     return f"{goat.ROUND3_NO_BUCKET}\n💰 +10 Z"

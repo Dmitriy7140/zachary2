@@ -119,6 +119,8 @@ async def init() -> None:
     await _ensure_column("profiles", "level", "INTEGER DEFAULT 0")
     await _ensure_column("profiles", "thefts", "INTEGER DEFAULT 0")
     await _ensure_column("profiles", "honest", "INTEGER DEFAULT 0")
+    # грязные деньги (Густав Налоговик); default 0 = все текущие балансы легальны
+    await _ensure_column("profiles", "dirty", "INTEGER DEFAULT 0")
     await _db.commit()
 
 
@@ -240,16 +242,44 @@ async def clear_playtime(until_day: str) -> None:
 # --- Zbucks / инвентарь / кулдауны ---
 
 async def spend_zbucks(tg_id: int, amount: int) -> bool:
-    """Списать Zbucks. False, если не хватает."""
+    """Списать Zbucks. False, если не хватает.
+
+    Первыми всегда тратятся ГРЯЗНЫЕ деньги — так от них можно избавиться,
+    пока Густав едет с проверкой.
+    """
     cur = await _db.execute("SELECT zbucks FROM profiles WHERE tg_id = ?", (tg_id,))
     row = await cur.fetchone()
     if not row or row[0] < amount:
         return False
     await _db.execute(
-        "UPDATE profiles SET zbucks = zbucks - ? WHERE tg_id = ?", (amount, tg_id)
+        "UPDATE profiles SET zbucks = zbucks - ?, dirty = MAX(0, dirty - ?) "
+        "WHERE tg_id = ?",
+        (amount, amount, tg_id),
     )
     await _db.commit()
     return True
+
+
+# --- грязные деньги (Густав Налоговик) ---
+
+async def get_dirty(tg_id: int) -> int:
+    cur = await _db.execute("SELECT dirty FROM profiles WHERE tg_id = ?", (tg_id,))
+    row = await cur.fetchone()
+    return row[0] if row and row[0] else 0
+
+
+async def add_dirty(tg_id: int, amount: int) -> None:
+    """Пометить часть баланса грязной (не больше самого баланса)."""
+    await _db.execute(
+        "UPDATE profiles SET dirty = MIN(zbucks, dirty + ?) WHERE tg_id = ?",
+        (amount, tg_id),
+    )
+    await _db.commit()
+
+
+async def set_dirty(tg_id: int, value: int) -> None:
+    await _db.execute("UPDATE profiles SET dirty = ? WHERE tg_id = ?", (value, tg_id))
+    await _db.commit()
 
 
 async def get_item_qty(tg_id: int, item: str) -> int:

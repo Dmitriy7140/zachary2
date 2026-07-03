@@ -10,6 +10,7 @@ from aiogram.utils.markdown import hlink
 from content.zhmyzhko import proletarian
 from db import storage
 from game.items import ITEMS, sellable_items
+from game.taxman import grant
 from utils.guards import ensure_private, with_owner
 from utils.notify import announce
 
@@ -119,7 +120,7 @@ async def market_price(msg: Message, state: FSMContext, bot: Bot):
 
     minutes = (price - it.sell_min) * it.sell_minutes_per_z
     if minutes <= 0:
-        await storage.add_zbucks(tg_id, price)
+        await grant(bot, tg_id, price)  # продажа на рынке — легальна
         await storage.bump(tg_id, f"sold_{it.key}")
         nick = (await storage.get_profile(tg_id))[2]
         await announce(bot, f"🏪 {hlink(nick, f'tg://user?id={tg_id}')} продал {it.emoji} {it.name} "

@@ -14,6 +14,7 @@ from aiogram.utils.markdown import hlink
 
 from content import casino
 from db import storage
+from game.taxman import grant
 from keyboards import back_menu
 from utils.cleanup import delete_later
 from utils.guards import ensure_private, with_owner
@@ -112,7 +113,7 @@ async def roulette_bet(msg: Message, state: FSMContext, bot: Bot):
     mention = hlink(msg.from_user.full_name, f"tg://user?id={tg_id}")
     if wheel == data["color"]:
         payout = int(bet * MULT[data["color"]])
-        await storage.add_zbucks(tg_id, payout)
+        await grant(bot, tg_id, payout, dirty=True)  # казиношные — грязные деньги
         await storage.bump(tg_id, "casino_won", payout - bet)
         line = f"Выпало {emoji} <b>{name}</b> — угадал! 🎉\nСтавка {bet} → <b>{payout} Z</b>"
         await announce(bot, casino.win_msg(mention, payout))

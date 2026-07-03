@@ -11,6 +11,7 @@ from aiogram.utils.markdown import hlink
 from content.scammer import CHARACTERS, hint
 from db import storage
 from game.scammer import ATTEMPTS, COOLDOWN_MIN, ROUNDS, WINDOW, WINDOW_CROSS, reward
+from game.taxman import grant
 from keyboards import back_menu
 from utils.guards import ensure_private
 from utils.notify import announce
@@ -122,7 +123,7 @@ async def _finish(bot: Bot, tg_id: int, state: FSMContext, prefix: str = "") -> 
         return
     score = g["score"]
     if score:
-        await storage.add_zbucks(tg_id, score)
+        await grant(bot, tg_id, score, dirty=True)  # развод по телефону — грязные
         await storage.bump(tg_id, "scam_won", score)
     await _say(bot, g, f"{prefix}📞 <b>Обзвон окончен!</b>\nНаварил: <b>{score} Z</b>",
                 back_menu(tg_id))

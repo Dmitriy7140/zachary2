@@ -9,6 +9,7 @@ from aiogram.utils.markdown import hlink
 
 from db import storage
 from game.debts import CHEPUSHILA_KEY, is_chepushila, schedule_first_nag
+from game.taxman import grant
 from utils.guards import ensure_private, with_owner
 from utils.notify import announce
 from utils.pagination import nav_row, page_slice
@@ -153,7 +154,7 @@ async def loan_yes(cb: CallbackQuery, bot: Bot):
             pass
         return await cb.answer()
 
-    await storage.add_zbucks(borrower_id, amount)
+    await grant(bot, borrower_id, amount, dirty=True)  # взятое в долг — грязные
     lender = _mention(lender_id, cb.from_user.full_name)
     b_profile = await storage.get_profile(borrower_id)
     borrower = _mention(borrower_id, b_profile[2] if b_profile else "Игрок")
@@ -189,7 +190,7 @@ async def loan_repay(cb: CallbackQuery, bot: Bot):
     if not await storage.spend_zbucks(cb.from_user.id, amount):
         return await cb.answer(f"Не хватает Z (нужно {amount})", show_alert=True)
 
-    await storage.add_zbucks(lender_id, amount)
+    await grant(bot, lender_id, amount)  # возврат долга кредитору — чистые
     await storage.remove_debt(did)
     tg_id = cb.from_user.id
     borrower = _mention(tg_id, cb.from_user.full_name)

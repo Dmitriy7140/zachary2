@@ -13,6 +13,7 @@ from game.debts import run_debts_scheduler
 from game.fishing import run_fishing_scheduler
 from game.market import run_market_scheduler
 from game.richest import run_richest_watcher
+from game.taxman import run_gustav_scheduler
 from handlers import (admin, bets, cashier, companion, courier, farca, fishing, inventory, loan,
                       market, minigames, pranks, registration, roulette, scammer, shop, stats,
                       vovka, work)
@@ -62,6 +63,7 @@ async def main() -> None:
     debts_task = asyncio.create_task(run_debts_scheduler(bot))
     richest_task = asyncio.create_task(run_richest_watcher(bot))
     fishing_task = asyncio.create_task(run_fishing_scheduler(bot))
+    gustav_task = asyncio.create_task(run_gustav_scheduler(bot))
 
     logging.info("Бот запущен")
     try:
@@ -74,6 +76,7 @@ async def main() -> None:
         debts_task.cancel()
         richest_task.cancel()
         fishing_task.cancel()
+        gustav_task.cancel()
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ from aiogram.types import Message
 from config import config
 from db import storage
 from game.daily import process_day
+from game.taxman import grant
 
 router = Router()
 
@@ -20,7 +21,7 @@ async def gimme(msg: Message):
     profile = await storage.get_profile(msg.from_user.id)
     if not profile:
         return await msg.answer("У тебя нет профиля — сначала зарегистрируйся 😉")
-    await storage.add_zbucks(msg.from_user.id, 100)
+    await grant(msg.bot, msg.from_user.id, 100)
     await msg.answer(f"💰 +100 Z (чит). Баланс: <b>{profile[3] + 100} Z</b>")
 
 

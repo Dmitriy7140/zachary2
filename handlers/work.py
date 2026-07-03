@@ -7,6 +7,7 @@ from content import thief as txt
 from db import storage
 from game.cashier import level_name as cashier_level_name
 from game.debts import chepushila_days_left, is_chepushila
+from game.taxman import grant
 from game.thief import (MIN_TARGET_WEALTH, THEFT_THRESHOLDS, is_fail, roll_quality,
                         steal_amount, thief_level)
 from utils.guards import ensure_owner, with_owner
@@ -152,7 +153,7 @@ async def thief_steal(cb: CallbackQuery, bot: Bot):
     quality = roll_quality(level)
     amount = steal_amount(quality, t_wealth, level)
     await storage.spend_zbucks(t_id, amount)   # у жертвы реально пропадает
-    await storage.add_zbucks(tg_id, amount)
+    await grant(bot, tg_id, amount, dirty=True)  # краденое — грязные деньги
     await storage.add_theft(tg_id)
     await storage.bump(t_id, "robbed")
     await storage.set_theft_cooldown(tg_id, 12)
