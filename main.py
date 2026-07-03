@@ -14,9 +14,9 @@ from game.fishing import run_fishing_scheduler
 from game.market import run_market_scheduler
 from game.richest import run_richest_watcher
 from game.taxman import run_gustav_scheduler
-from handlers import (admin, bets, cashier, companion, courier, farca, fishing, inventory, loan,
-                      market, minigames, pranks, registration, roulette, scammer, shop, stats,
-                      vovka, work)
+from handlers import (admin, bets, cashier, companion, courier, farca, finance, fishing,
+                      inventory, loan, market, minigames, pranks, registration, roulette,
+                      scammer, shady, shop, stats, vovka, work)
 from mc.poller import run_poller
 
 logging.basicConfig(
@@ -50,6 +50,8 @@ async def main() -> None:
     dp.include_router(market.router)
     dp.include_router(bets.router)
     dp.include_router(loan.router)
+    dp.include_router(finance.router)
+    dp.include_router(shady.router)
     dp.include_router(pranks.router)
     dp.include_router(companion.router)
 

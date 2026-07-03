@@ -11,6 +11,7 @@ from aiogram.utils.markdown import hlink
 from content.items_fun import (bike_ride, bike_ride_chat, milk_drink, milk_drink_chat, milk_shake,
                                milk_shake_chat, rod_wave, rod_wave_chat)
 from content.phone import iphone_butt
+from content.shady import iphone_trash
 from db import storage
 from game.items import ITEMS
 from keyboards import back_menu
@@ -24,7 +25,7 @@ BIKE_INSURANCE_PCT = 5
 
 # доступные действия по предметам: key -> [(action, label)]
 ACTIONS = {
-    "iphone": [("butt", "🍑 Засунуть в жопу")],
+    "iphone": [("butt", "🍑 Засунуть в жопу"), ("trash", "🗑 Выбросить")],
     "samsung": [("write", "✉️ Написать сообщение")],
     "bike": [("ride", "🚲 Покататься на велике")],
     "milk_can": [("shake", "🥤 Взболтать"), ("drink", "🥛 Попить")],
@@ -96,6 +97,8 @@ async def item_action(cb: CallbackQuery, bot: Bot):
 
     if key == "iphone" and action == "butt":
         await _iphone_butt(cb, bot, tg_id)
+    elif key == "iphone" and action == "trash":
+        await _iphone_trash(cb, bot, tg_id)
     elif key == "samsung" and action == "write":
         await _samsung_write(cb, tg_id)
     elif key == "bike" and action == "ride":
@@ -129,6 +132,17 @@ async def _iphone_butt(cb: CallbackQuery, bot: Bot, tg_id: int) -> None:
     mention = hlink(cb.from_user.full_name, f"tg://user?id={tg_id}")
     await announce(bot, iphone_butt(mention))
     await cb.answer("🍑 Сделано. Тред уже осуждает.", show_alert=True)
+
+
+async def _iphone_trash(cb: CallbackQuery, bot: Bot, tg_id: int) -> None:
+    if not await storage.remove_item(tg_id, "iphone", 1):
+        return await cb.answer("Айфона уже нет", show_alert=True)
+    await announce(bot, iphone_trash(_mention(cb)))
+    await cb.message.edit_text(
+        "🗑 Айфон отправился в мусорку. Жопа снова в строю — пятая тысяча влезет.",
+        reply_markup=back_menu(tg_id),
+    )
+    await cb.answer()
 
 
 async def _bike_ride(cb: CallbackQuery, bot: Bot, tg_id: int) -> None:

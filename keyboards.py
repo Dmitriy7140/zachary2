@@ -20,7 +20,7 @@ def approve_kb(tg_id: int, nick: str) -> InlineKeyboardMarkup:
 
 def main_menu(owner: int) -> InlineKeyboardMarkup:
     # нечётные ряды — 1 кнопка, чётные — 2; сначала Работа и Мини-игры.
-    # Рынок/Ставки/Пакости — без owner (только в личке, ensure_private).
+    # Рынок/Финансы/Пакости/Махинации — без owner (только в личке, ensure_private).
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="💼 Работа", callback_data=f"menu:work:{owner}")],
@@ -29,9 +29,8 @@ def main_menu(owner: int) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="🛒 Магазин", callback_data=f"menu:shop:{owner}"),
              InlineKeyboardButton(text="🃏 Фарцовщик", callback_data=f"menu:farca:{owner}")],
             [InlineKeyboardButton(text="🏪 Рынок", callback_data="menu:market"),
-             InlineKeyboardButton(text="🤝 Ставки", callback_data="menu:bets")],
-            [InlineKeyboardButton(text="😈 Пакости", callback_data="menu:pranks"),
-             InlineKeyboardButton(text="🤲 Долг", callback_data="menu:loan")],
+             InlineKeyboardButton(text="💳 Финансы", callback_data="menu:finance")],
+            [InlineKeyboardButton(text="😈 Пакости", callback_data="menu:pranks")],
         ]
     )
 
