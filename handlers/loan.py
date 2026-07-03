@@ -8,7 +8,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from aiogram.utils.markdown import hlink
 
 from db import storage
-from game.debts import schedule_first_nag
+from game.debts import CHEPUSHILA_KEY, is_chepushila, schedule_first_nag
 from utils.guards import ensure_private, with_owner
 from utils.notify import announce
 from utils.pagination import nav_row, page_slice
@@ -191,11 +191,24 @@ async def loan_repay(cb: CallbackQuery, bot: Bot):
 
     await storage.add_zbucks(lender_id, amount)
     await storage.remove_debt(did)
-    borrower = _mention(cb.from_user.id, cb.from_user.full_name)
+    tg_id = cb.from_user.id
+    borrower = _mention(tg_id, cb.from_user.full_name)
     lender = _mention(lender_id, lender_nick)
     await announce(bot, f"🤝 {borrower} вернул {lender} долг <b>{amount} Z</b>. Красава!")
     await cb.answer(f"Долг {amount} Z возвращён!", show_alert=True)
-    await _render(cb.message, cb.from_user.id)
+
+    # Рассчитался по ВСЕМ долгам → реабилитация + «Честный человек»
+    if not await storage.get_debts(tg_id):
+        was_chep = await is_chepushila(tg_id)
+        if was_chep:
+            await storage.clear_status(tg_id, CHEPUSHILA_KEY)
+        await storage.set_honest(tg_id, True)
+        if was_chep:
+            await announce(bot, f"🎖 {borrower} искупил вину — статус «Чепушила» снят, теперь он «Честный человек»!")
+        else:
+            await announce(bot, f"🎖 {borrower} рассчитался по всем долгам — теперь он «Честный человек» (+10% к легалке)!")
+
+    await _render(cb.message, tg_id)
 
 
 @router.callback_query(F.data.startswith("loan:no:"))

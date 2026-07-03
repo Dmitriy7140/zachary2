@@ -177,6 +177,9 @@ async def _finish(bot: Bot, tg_id: int) -> None:
     if not state:
         return
     payout = max(0, state["score"])
+    honest = await storage.is_honest(tg_id)
+    if honest:
+        payout = int(payout * 1.1)  # бонус «Честного человека»
     picks = state["picks"]
     if payout:
         await storage.add_zbucks(tg_id, payout)
@@ -186,7 +189,8 @@ async def _finish(bot: Bot, tg_id: int) -> None:
     await storage.bump(tg_id, "cashier_games")
 
     games = await storage.player_stat(tg_id, "cashier_games")
-    text = (f"🛒 <b>Смена окончена!</b>\nЗаработано: <b>{payout} Z</b>\n"
+    bonus = " (+10% Честный человек 🎖)" if honest else ""
+    text = (f"🛒 <b>Смена окончена!</b>\nЗаработано: <b>{payout} Z</b>{bonus}\n"
             f"Пикнуто товаров: {picks}\nСмен отработано: {games}\nРанг: {LEVEL_NAMES[level(games)]}")
     if state["level"] == "junior" and level(games) == "senior":
         text += f"\n\n🎉 Повышение до Старшего кассира! ЗП теперь ×2."

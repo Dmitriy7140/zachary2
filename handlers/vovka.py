@@ -6,6 +6,7 @@
 import asyncio
 import logging
 import random
+import time
 from datetime import datetime, timedelta
 
 from aiogram import Bot, F, Router
@@ -27,9 +28,20 @@ COST = 0
 COOLDOWN = timedelta(seconds=3)
 ROUND_TIME = 5   # сек на реакцию (бездействие = проигрыш раунда)
 GAP = 2          # сек между раундами
+MIN_REACTION = 0.4  # сек: клик быстрее — это бот, засчитываем промах
 
 BALD = "👨‍🦲"
 HAIRY = "🧑‍🦰"
+
+# Пул «жертв»: каждый раунд один тип — цель (уникальный), другой — фон (8 штук).
+TYPES = [
+    ("👨‍🦲", "лысого"),
+    ("🧑‍🦰", "рыжего"),
+    ("🤓", "ботаника"),
+    ("🧔", "бородатого"),
+    ("👮", "мента"),
+    ("🤡", "клоуна"),
+]
 
 _games: dict[int, dict] = {}   # tg_id -> состояние партии
 _bg: set = set()               # ссылки на фоновые задачи
@@ -84,9 +96,9 @@ async def _intro_then_start(bot: Bot, tg_id: int) -> None:
         return
     sent = await bot.send_message(
         state["chat_id"],
-        f"🥊 <b>Бей лысого!</b>\n\n"
-        f"Бей: {BALD}\n"
-        f"Не бей: {HAIRY}\n\n"
+        f"🥊 <b>Бей Вовку!</b>\n\n"
+        f"Каждый раунд назову, кого бить — он всегда <b>один среди одинаковых</b>.\n"
+        f"Читай задание внимательно 👀\n\n"
         f"Начинаем через 5 секунд…",
     )
     await asyncio.sleep(5)
@@ -108,26 +120,28 @@ async def _start_round(bot: Bot, tg_id: int) -> None:
     if rnd > ROUNDS:
         return await _finish(bot, tg_id)
 
-    bald = random.randint(0, 8)
+    target_pos = random.randint(0, 8)
+    (t_emoji, t_label), (f_emoji, _) = random.sample(TYPES, 2)  # цель и фон — разные типы
     state["active"] = rnd
+    state["bald"] = target_pos      # ответ храним на сервере, не в callback_data
     rows = []
     for r in range(3):
         row = []
         for c in range(3):
             i = r * 3 + c
-            is_bald = i == bald
             row.append(InlineKeyboardButton(
-                text=BALD if is_bald else HAIRY,
-                callback_data=f"vovka:hit:{'b' if is_bald else 'h'}:{rnd}",
+                text=t_emoji if i == target_pos else f_emoji,
+                callback_data=f"vovka:hit:{i}:{rnd}",  # только позиция кнопки
             ))
         rows.append(row)
 
     sent = await bot.send_message(
         state["chat_id"],
-        f"🥊 Раунд {rnd}/{ROUNDS} — бей Вовку (лысого {BALD})! ⏱ {ROUND_TIME} сек",
+        f"🥊 Раунд {rnd}/{ROUNDS} — <b>бей {t_label}</b> ({t_emoji})! ⏱ {ROUND_TIME} сек",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
     )
     state["msg_id"] = sent.message_id
+    state["shown_at"] = time.monotonic()   # для проверки скорости реакции
     state["timeout"] = asyncio.create_task(
         _round_timeout(bot, tg_id, rnd, state["chat_id"], sent.message_id)
     )
@@ -141,8 +155,9 @@ async def vovka_hit(cb: CallbackQuery, bot: Bot):
     state = _games.get(tg_id)
     if not state:
         return await cb.answer()
-    _, _, tag, rnd_raw = cb.data.split(":")
+    _, _, pos_raw, rnd_raw = cb.data.split(":")
     rnd = int(rnd_raw)
+    pos = int(pos_raw)
     if state.get("active") != rnd:
         return await cb.answer()  # устаревший / уже разрешённый клик
 
@@ -150,16 +165,23 @@ async def vovka_hit(cb: CallbackQuery, bot: Bot):
     if state.get("timeout"):
         state["timeout"].cancel()
 
-    won = tag == "b"
+    # анти-бот: нечеловечески быстрый клик = промах
+    too_fast = (time.monotonic() - state.get("shown_at", 0)) < MIN_REACTION
+    won = (pos == state.get("bald")) and not too_fast
     if won:
         state["wins"] += 1
+
+    if too_fast:
+        result, toast = "⚡ Слишком быстро — засчитано как промах!", "⚡ Не жульничай!"
+    elif won:
+        result, toast = "✅ ПОПАЛ!", ""
+    else:
+        result, toast = "❌ Мимо!", ""
     try:
-        await cb.message.edit_text(
-            f"Раунд {rnd}/{ROUNDS}: " + ("✅ ПОПАЛ!" if won else "❌ Мимо!")
-        )
+        await cb.message.edit_text(f"Раунд {rnd}/{ROUNDS}: {result}")
     except Exception:
         pass
-    await cb.answer()
+    await cb.answer(toast)
     _spawn(_advance(bot, tg_id))
 
 

@@ -118,6 +118,7 @@ async def init() -> None:
     await _ensure_column("profiles", "xp", "INTEGER DEFAULT 0")
     await _ensure_column("profiles", "level", "INTEGER DEFAULT 0")
     await _ensure_column("profiles", "thefts", "INTEGER DEFAULT 0")
+    await _ensure_column("profiles", "honest", "INTEGER DEFAULT 0")
     await _db.commit()
 
 
@@ -501,6 +502,17 @@ async def cooldown_left_secs(tg_id: int, key: str) -> int:
 async def clear_status(tg_id: int, key: str) -> None:
     await _db.execute("DELETE FROM cooldowns WHERE tg_id = ? AND game = ?", (tg_id, key))
     await _db.commit()
+
+
+async def set_honest(tg_id: int, val: bool) -> None:
+    await _db.execute("UPDATE profiles SET honest = ? WHERE tg_id = ?", (1 if val else 0, tg_id))
+    await _db.commit()
+
+
+async def is_honest(tg_id: int) -> bool:
+    cur = await _db.execute("SELECT honest FROM profiles WHERE tg_id = ?", (tg_id,))
+    row = await cur.fetchone()
+    return bool(row and row[0])
 
 
 async def expired_statuses(key: str, now_iso: str) -> list[int]:

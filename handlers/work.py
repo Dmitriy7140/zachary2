@@ -33,9 +33,14 @@ async def work_menu(cb: CallbackQuery):
 
     level = thief_level(await storage.get_thefts(owner))
     cgames = await storage.player_stat(owner, "cashier_games")
-    lines = [
-        "💼 <b>Работа</b>",
-        "",
+    lines = ["💼 <b>Работа</b>", ""]
+    if await is_chepushila(owner):
+        lines.append(f"🤡 <b>Чепушила</b> (~{await chepushila_days_left(owner)} дн) — легалка закрыта")
+        lines.append("")
+    elif await storage.is_honest(owner):
+        lines.append("🎖 <b>Честный человек</b> — +10% к легальной работе")
+        lines.append("")
+    lines += [
         "<b>Текущие ранги:</b>",
         f"🛒 Кассир — {cashier_level_name(cgames)}",
         f"🦹 Вор — {txt.LEVEL_NAMES[level - 1]}",
