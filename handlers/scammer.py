@@ -10,7 +10,7 @@ from aiogram.utils.markdown import hlink
 
 from content.scammer import CHARACTERS, hint
 from db import storage
-from game.scammer import ATTEMPTS, COOLDOWN_MIN, ROUNDS, reward
+from game.scammer import ATTEMPTS, COOLDOWN_MIN, ROUNDS, WINDOW, WINDOW_CROSS, reward
 from keyboards import back_menu
 from utils.guards import ensure_private
 from utils.notify import announce
@@ -42,10 +42,12 @@ async def scammer_start(cb: CallbackQuery, state: FSMContext, bot: Bot):
             return await cb.answer(f"⏳ Телефон разряжается, ещё {left // 60}м {left % 60}с", show_alert=True)
     await storage.set_cooldown(tg_id, "scammer")
 
+    window = WINDOW_CROSS if await storage.get_item_qty(tg_id, "cross") > 0 else WINDOW
     _games[tg_id] = {
         "round": 0, "score": 0, "chars": random.sample(list(CHARACTERS), ROUNDS),
         "name": cb.from_user.full_name, "chat_id": cb.message.chat.id,
         "msg_id": cb.message.message_id, "target": None, "best": None, "attempts": 0,
+        "window": window,
     }
     await cb.answer()
     await _next_round(bot, tg_id, state)
@@ -104,7 +106,7 @@ async def scam_attempt(msg: Message, state: FSMContext, bot: Bot):
                            f"📞 <b>{character}</b>\nТы написал: {count} слов.\n"
                            f"{hint(count, target, character)}\nПопыток осталось: {g['attempts']}.")
 
-    r = reward(g["best"])
+    r = reward(g["best"], g["window"])
     g["score"] += r
     if r > 0:
         prefix = f"💸 {character} поколебался и отдал <b>{r} Z</b> (мимо на {g['best']}).\n\n"

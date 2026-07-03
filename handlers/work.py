@@ -105,6 +105,7 @@ async def work_illegal(cb: CallbackQuery):
         [InlineKeyboardButton(text="🦹 Залезть в карман", callback_data=with_owner("thief:steal", owner))],
         # мошенник — только в личке (нужен ввод текста), без owner
         [InlineKeyboardButton(text="📞 Телефонный мошенник", callback_data="scammer:start")],
+        [InlineKeyboardButton(text="🃏 Фарцовщик", callback_data=with_owner("menu:farca", owner))],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data=with_owner("menu:work", owner))],
     ]
     await cb.message.edit_text("\n".join(lines), reply_markup=_kb(rows))
@@ -139,17 +140,19 @@ async def thief_steal(cb: CallbackQuery, bot: Bot):
         return await announce(bot, txt.poor_chat(thief, t_nick))
 
     level = thief_level(await storage.get_thefts(tg_id))
+    reduction = 5 if await storage.get_item_qty(tg_id, "lockpicks") > 0 else 0  # отмычки
 
     # провал
-    if is_fail(level):
+    if is_fail(level, reduction):
         await storage.set_theft_cooldown(tg_id, 1)
         await cb.message.edit_text("🦹 " + txt.fail(t_nick), reply_markup=back)
         await cb.answer()
         return await announce(bot, txt.fail_chat(thief, t_nick))
 
-    # успех
+    # успех — крадём РЕАЛЬНЫЕ деньги у цели
     quality = roll_quality(level)
-    amount = steal_amount(quality, t_wealth)
+    amount = steal_amount(quality, t_wealth, level)
+    await storage.spend_zbucks(t_id, amount)   # у жертвы реально пропадает
     await storage.add_zbucks(tg_id, amount)
     await storage.add_theft(tg_id)
     await storage.bump(t_id, "robbed")
@@ -159,4 +162,4 @@ async def thief_steal(cb: CallbackQuery, bot: Bot):
         reply_markup=back,
     )
     await cb.answer()
-    await announce(bot, txt.success_chat(quality, thief, t_nick))
+    await announce(bot, txt.success_chat(quality, thief, t_nick, amount))

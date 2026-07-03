@@ -9,6 +9,7 @@ class Item:
     emoji: str
     max_qty: int
     price: int | None = None       # None = не продаётся в магазине
+    blackmarket: bool = False      # продаётся у Фарцовщика, а не в обычном магазине
     # Рынок: диапазон цены и «минут за каждый +1 Z сверх минимума»
     sell_min: int = 0
     sell_max: int = 0
@@ -34,12 +35,20 @@ ITEMS: dict[str, Item] = {
                    sell_min=150, sell_max=200, sell_minutes_per_z=10),
     "fish_3": Item("fish_3", "Рыба 🐠", "🐠", max_qty=99,
                    sell_min=400, sell_max=420, sell_minutes_per_z=10),
+    # запрещёнка (Фарцовщик)
+    "lockpicks": Item("lockpicks", "Отмычки", "🗝", max_qty=1, price=5000, blackmarket=True),
+    "cross": Item("cross", "Православный крест", "✝️", max_qty=1, price=10000, blackmarket=True),
 }
 
 
 def shop_items() -> list[Item]:
-    """Предметы, доступные к покупке."""
-    return [it for it in ITEMS.values() if it.price is not None]
+    """Предметы обычного магазина."""
+    return [it for it in ITEMS.values() if it.price is not None and not it.blackmarket]
+
+
+def blackmarket_items() -> list[Item]:
+    """Запрещённые товары Фарцовщика."""
+    return [it for it in ITEMS.values() if it.price is not None and it.blackmarket]
 
 
 def sellable_items() -> list[Item]:
