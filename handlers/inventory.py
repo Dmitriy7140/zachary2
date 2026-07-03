@@ -8,7 +8,8 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from aiogram.utils.markdown import hlink
 
-from content.items_fun import bike_ride, milk_drink, milk_shake, rod_wave
+from content.items_fun import (bike_ride, bike_ride_chat, milk_drink, milk_drink_chat, milk_shake,
+                               milk_shake_chat, rod_wave, rod_wave_chat)
 from content.phone import iphone_butt
 from db import storage
 from game.items import ITEMS
@@ -101,12 +102,19 @@ async def item_action(cb: CallbackQuery, bot: Bot):
         await _bike_ride(cb, bot, tg_id)
     elif key == "milk_can" and action == "shake":
         await cb.answer(milk_shake(), show_alert=True)
+        await announce(bot, milk_shake_chat(_mention(cb)))
     elif key == "milk_can" and action == "drink":
         await cb.answer(milk_drink(), show_alert=True)
+        await announce(bot, milk_drink_chat(_mention(cb)))
     elif key == "rod" and action == "wave":
         await cb.answer(rod_wave(), show_alert=True)
+        await announce(bot, rod_wave_chat(_mention(cb)))
     else:
         await cb.answer()
+
+
+def _mention(cb: CallbackQuery) -> str:
+    return hlink(cb.from_user.full_name, f"tg://user?id={cb.from_user.id}")
 
 
 async def _iphone_butt(cb: CallbackQuery, bot: Bot, tg_id: int) -> None:
@@ -129,10 +137,7 @@ async def _bike_ride(cb: CallbackQuery, bot: Bot, tg_id: int) -> None:
     if take > 0:
         await storage.spend_zbucks(tg_id, take)
     await cb.answer(bike_ride(take), show_alert=True)
-    if take > 0:
-        mention = hlink(cb.from_user.full_name, f"tg://user?id={tg_id}")
-        await announce(bot, f"🚲 {mention} прокатился на Велике Братане, навернулся и "
-                            f"отдал страховой {take} Z. Братан: «Говорил же — тормоза для трусов».")
+    await announce(bot, bike_ride_chat(_mention(cb), take))
 
 
 # --- Самсунг: список получателей + отправка (только в личке) ---

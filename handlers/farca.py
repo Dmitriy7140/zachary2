@@ -35,7 +35,7 @@ async def _render(message, owner: int) -> None:
         else:
             rows.append([InlineKeyboardButton(text=f"{it.emoji} {it.name} — {it.price} Z",
                                               callback_data=with_owner(f"farca:buy:{it.key}", owner))])
-    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=with_owner("menu:work", owner))])
+    rows.append([InlineKeyboardButton(text="⬅️ В меню", callback_data=with_owner("menu:main", owner))])
     await message.edit_text("\n".join(lines), reply_markup=_kb(rows))
 
 

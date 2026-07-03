@@ -26,6 +26,30 @@ _ROD_WAVE = [
 ]
 
 
+# --- объявления в тред (третье лицо, мат нещадный) ---
+_MILK_SHAKE_CHAT = [
+    "🥛 {player} трясёт пакет обезжиренного молока, как конченый дебил. Масла нихуя не будет.",
+    "🥛 {player} взболтал молоко и стоит довольный, дурила. Оно ОБЕЗЖИРЕННОЕ, блядь.",
+    "🥛 {player} взбалтывает молоко. Зачем, нахуй? Не знает никто, включая самого {player}.",
+]
+_MILK_DRINK_CHAT = [
+    "🥛 {player} хлебнул прокисшего молока и блюёт теперь где-то за гаражами. Идиот.",
+    "🥛 {player} выпил молоко с привкусом мочи и сукровицы. Приятного, дегенерат ты этакий.",
+    "🥛 {player} дёрнул кислятины из пакета — лицо перекосило нахуй. Так тебе и надо.",
+]
+_ROD_WAVE_CHAT = [
+    "🎣 {player} машет удочкой на сухом месте и порвал себе штаны крючком. Клоун, блядь.",
+    "🎣 {player} разодрал портки собственной удочкой. Гений рыбалки, ебать его в качель.",
+    "🎣 {player} махнул удочкой и зацепил крючком яйца. Поделом тебе, придурок.",
+]
+_BIKE_RIDE_CHAT = [
+    "🚲 {player} сел на Велик Братана, ебанулся мордой в асфальт и слил страховой {take} Z. "
+    "Братан: «Тормоза для трусов, а ты просто криворукий мудак».",
+    "🚲 {player} проехал два метра и наебнулся, сломав ногу. Минус {take} Z. Клоун на колёсах.",
+    "🚲 {player} навернулся с велика как последний долбоёб. Гипс, скорая, минус {take} Z, позорище.",
+]
+
+
 def milk_shake() -> str:
     return random.choice(_MILK_SHAKE)
 
@@ -40,3 +64,19 @@ def bike_ride(take: int) -> str:
 
 def rod_wave() -> str:
     return random.choice(_ROD_WAVE)
+
+
+def milk_shake_chat(player: str) -> str:
+    return random.choice(_MILK_SHAKE_CHAT).format(player=player)
+
+
+def milk_drink_chat(player: str) -> str:
+    return random.choice(_MILK_DRINK_CHAT).format(player=player)
+
+
+def rod_wave_chat(player: str) -> str:
+    return random.choice(_ROD_WAVE_CHAT).format(player=player)
+
+
+def bike_ride_chat(player: str, take: int) -> str:
+    return random.choice(_BIKE_RIDE_CHAT).format(player=player, take=take)
