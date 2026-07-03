@@ -30,6 +30,7 @@ async def allstats(msg: Message):
         f"🦹 Самая частая жертва краж: <b>{_top(await storage.stat_top('robbed'), ' раз')}</b>",
         f"🎰 Просажено в казино: <b>{lost} Z</b> (отыграно {won} Z)",
         f"🥊 Заработано на «Бей Вовку»: <b>{await storage.stat_sum('vovka_won')} Z</b>",
+        f"😡 Чаще всех получал по щам от Вовки: <b>{_top(await storage.stat_top('vovka_revenge'), ' раз')}</b>",
         f"🥛 Продано молока: <b>{await storage.stat_sum('sold_milk_can')}</b> шт",
         f"🐐 Раз подоили козу: <b>{await storage.stat_sum('goat_milked')}</b>",
         f"🎣 Больше всех наловил рыбы: <b>{_top(await storage.stat_top('fish_caught'), ' шт')}</b>",
@@ -70,7 +71,7 @@ async def mystats(msg: Message):
         f"🛵 Курьером заработано: <b>{await st('courier_won')} Z</b>",
         f"🎰 Казино: проиграно <b>{await st('casino_lost')} Z</b>, в плюс <b>{await st('casino_won')} Z</b>",
         f"🤝 Ставки: <b>{b_won}</b> побед / <b>{b_lost}</b> поражений (<b>{b_pct}%</b> выигрыша)",
-        f"🥊 «Бей Вовку»: заработано <b>{await st('vovka_won')} Z</b>",
+        f"🥊 «Бей Вовку»: заработано <b>{await st('vovka_won')} Z</b> · 😡 месть словил <b>{await st('vovka_revenge')}</b> раз",
         f"🛒 Кассир: смен <b>{await st('cashier_games')}</b>, пикнуто <b>{await st('cashier_picks')}</b> шт, "
         f"заработано <b>{await st('cashier_won')} Z</b>",
         f"🎣 Рыбы поймано: <b>{await st('fish_caught')}</b> · 🍑 айфон в жопу: <b>{await st('iphone_butt')}</b> раз",

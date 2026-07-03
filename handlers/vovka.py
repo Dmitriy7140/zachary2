@@ -45,12 +45,25 @@ TYPES = [
 
 _games: dict[int, dict] = {}   # tg_id -> состояние партии
 _bg: set = set()               # ссылки на фоновые задачи
+_hit_log: dict[int, list[float]] = {}   # tg_id -> времена удачных ударов Вовки
+
+HIT_LIMIT = 15        # больше стольких ударов Вовки за час -> «месть Вовки»
+HIT_WINDOW = 3600     # окно, сек
 
 
 def _spawn(coro) -> None:
     t = asyncio.create_task(coro)
     _bg.add(t)
     t.add_done_callback(_bg.discard)
+
+
+def _register_hit(tg_id: int) -> bool:
+    """Записать удачный удар. Вернуть True, если пора мстить (>15 за час)."""
+    now = time.time()
+    log = [t for t in _hit_log.get(tg_id, []) if now - t < HIT_WINDOW]
+    log.append(now)
+    _hit_log[tg_id] = log
+    return len(log) > HIT_LIMIT
 
 
 @router.callback_query(F.data == "vovka:start")
@@ -170,6 +183,9 @@ async def vovka_hit(cb: CallbackQuery, bot: Bot):
     won = (pos == state.get("bald")) and not too_fast
     if won:
         state["wins"] += 1
+        if _register_hit(tg_id):          # доборзел — месть Вовки
+            await cb.answer("😡")
+            return await _revenge(bot, tg_id, cb.from_user.full_name)
 
     if too_fast:
         result, toast = "⚡ Слишком быстро — засчитано как промах!", "⚡ Не жульничай!"
@@ -183,6 +199,42 @@ async def vovka_hit(cb: CallbackQuery, bot: Bot):
         pass
     await cb.answer(toast)
     _spawn(_advance(bot, tg_id))
+
+
+async def _revenge(bot: Bot, tg_id: int, name: str) -> None:
+    """Месть Вовки: прервать игру, отнять половину денег, ославить в треде."""
+    _hit_log.pop(tg_id, None)
+    state = _games.pop(tg_id, None)
+    if state and state.get("timeout"):
+        state["timeout"].cancel()
+
+    profile = await storage.get_profile(tg_id)
+    take = profile[3] // 2 if profile else 0
+    if take > 0:
+        await storage.spend_zbucks(tg_id, take)
+    await storage.bump(tg_id, "vovka_revenge")
+
+    text = (f"😡 <b>МЕСТЬ ВОВКИ!</b>\nДруганы Вовки обступили тебя со всех сторон, "
+            f"отпинали и вытрясли <b>{take} Z</b> — половину всех денег. Не борзей.")
+    chat_id = state["chat_id"] if state else tg_id
+    msg_id = state.get("msg_id") if state else None
+    done = False
+    if msg_id:
+        try:
+            await bot.edit_message_text(text, chat_id=chat_id, message_id=msg_id,
+                                        reply_markup=back_menu(tg_id))
+            done = True
+        except Exception:
+            pass
+    if not done:
+        try:
+            await bot.send_message(chat_id, text, reply_markup=back_menu(tg_id))
+        except Exception:
+            pass
+
+    mention = hlink(name, f"tg://user?id={tg_id}")
+    await announce(bot, f"😡 <b>Месть Вовки!</b> Друганы Вовки отметелили {mention} "
+                        f"и вытрясли {take} Z — за то, что слишком борзо махал кулаками.")
 
 
 async def _round_timeout(bot: Bot, tg_id: int, rnd: int, chat_id: int, msg_id: int) -> None:
