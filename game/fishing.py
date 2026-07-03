@@ -15,7 +15,7 @@ CAST_MINUTES = 10
 MILK_CHANCE = 0.05
 
 # рыб для уровня
-LEVEL_THRESHOLDS = {2: 200, 3: 500}
+LEVEL_THRESHOLDS = {2: 50, 3: 100}
 # шанс поймать рыбу тира T на уровне L
 CHANCE = {
     1: {1: 0.50},
@@ -33,6 +33,14 @@ def fishing_level(fish_caught: int) -> int:
     if fish_caught >= LEVEL_THRESHOLDS[2]:
         return 2
     return 1
+
+
+def fish_to_next_level(fish_caught: int) -> int | None:
+    """Сколько рыб до следующего уровня (None — уровень максимальный)."""
+    level = fishing_level(fish_caught)
+    if level >= 3:
+        return None
+    return LEVEL_THRESHOLDS[level + 1] - fish_caught
 
 
 def roll_catch(level: int, bait_tier: int) -> str | None:

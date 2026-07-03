@@ -8,7 +8,7 @@ from aiogram.types import CallbackQuery, Message
 
 from content.ranks import rank
 from db import storage
-from game.fishing import fishing_level
+from game.fishing import fish_to_next_level, fishing_level
 from game.leveling import xp_for_level
 from keyboards import main_menu
 from mc.rcon import online_players
@@ -31,7 +31,11 @@ async def _profile_card(profile: tuple) -> str:
     tg_id, _, nick, zbucks, xp, level = profile
     here = xp - xp_for_level(level)              # опыт внутри текущего уровня
     need = xp_for_level(level + 1) - xp_for_level(level)  # цена следующего уровня
-    flvl = fishing_level(await storage.player_stat(tg_id, "fish_caught"))
+    fish = await storage.player_stat(tg_id, "fish_caught")
+    flvl = fishing_level(fish)
+    to_next = fish_to_next_level(fish)
+    fish_line = f"🎣 Рыбак: ур. <b>{flvl}</b>"
+    fish_line += " (макс)" if to_next is None else f" (до след. уровня {to_next} рыб)"
     dirty = await storage.get_dirty(tg_id)
     dirty_line = f"🧾 Из них грязные бабки: <b>{dirty} Z</b>"
     if dirty:
@@ -40,7 +44,7 @@ async def _profile_card(profile: tuple) -> str:
         f"👤 <b>{nick}</b>\n"
         f"⭐ Уровень <b>{level}</b> — {rank(level)}\n"
         f"✨ Опыт: {here} / {need} (до уровня {level + 1})\n"
-        f"🎣 Рыбалка: ур. <b>{flvl}</b>\n"
+        f"{fish_line}\n"
         f"💰 Всего денег: <b>{zbucks} Z</b>\n"
         f"{dirty_line}"
     )
