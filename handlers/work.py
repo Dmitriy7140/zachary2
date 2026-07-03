@@ -70,11 +70,13 @@ async def work_legal(cb: CallbackQuery):
     cgames = await storage.player_stat(owner, "cashier_games")
     rows = [
         [InlineKeyboardButton(text="🛒 Кассир — на смену", callback_data="cashier:start")],
+        [InlineKeyboardButton(text="🛵 Курьер", callback_data="courier:menu")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data=with_owner("menu:work", owner))],
     ]
     await cb.message.edit_text(
-        f"✅ <b>Легальная работа</b>\n\n🛒 Кассир — ранг: <b>{cashier_level_name(cgames)}</b> "
-        f"(смен: {cgames})\nИгра раз в 30 мин.",
+        f"✅ <b>Легальная работа</b>\n\n"
+        f"🛒 Кассир — ранг: <b>{cashier_level_name(cgames)}</b> (смен: {cgames})\n"
+        f"🛵 Курьер — доставка по притчам сломанного навигатора",
         reply_markup=_kb(rows),
     )
     await cb.answer()

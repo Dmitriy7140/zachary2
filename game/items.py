@@ -22,6 +22,7 @@ ITEMS: dict[str, Item] = {
     # техника (пригодится для будущих работ)
     "iphone": Item("iphone", "Айфон", "📱", max_qty=1, price=2000),
     "samsung": Item("samsung", "Самсунг", "📲", max_qty=1, price=1000),
+    "bike": Item("bike", "Велосипед Братан", "🚲", max_qty=1, price=3000),
     # рыбалка
     "rod": Item("rod", "Удочка", "🎣", max_qty=1, price=500),
     "bait_1": Item("bait_1", "Приманка на 🐟", "🪱", max_qty=99, price=55),
