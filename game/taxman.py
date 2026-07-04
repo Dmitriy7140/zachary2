@@ -22,6 +22,7 @@ from aiogram.utils.markdown import hlink
 from content.gustav import (bribe_personal, bribe_thread, evaded_hidden, evaded_thread,
                             warn_personal, warn_thread)
 from db import storage
+from db.storage import HIDE_CD_KEY, HIDE_KEY, hidden_meta_key  # noqa: F401 (ре-экспорт)
 from utils.notify import announce
 
 log = logging.getLogger(__name__)
@@ -33,25 +34,18 @@ RAID_KEY = "gustav_raid"
 RAID_MINUTES = 10    # сколько даём на «избавиться от грязного»
 
 # прятки (меню «Махинации»): деньги остаются на счету и остаются грязными,
-# просто Густав их не находит, пока прятка активна
-HIDE_KEY = "gustav_hide"
+# просто Густав их не находит, пока прятка активна. Спрятанное нельзя ни
+# потратить, ни украсть (проверки в storage.spend_zbucks / handlers.work).
+# Ключи и hidden_now живут в storage — отсюда ре-экспортируются для хендлеров.
 HIDE_MINUTES = 2     # в этом вся соль — подгадать момент
+HIDE_COOLDOWN_MIN = 5   # кд от нажатия до следующей прятки
 HIDE_CAP = 5000      # носки + трусы + рот + ноздри/уши + жопа
 HIDE_CAP_IPHONE = 4000  # у владельцев айфона очко растянуто — жопа не держит
 
 
-def hidden_meta_key(tg_id: int) -> str:
-    return f"gustav_hidden:{tg_id}"
-
-
 async def active_hidden(tg_id: int) -> int:
     """Сколько Z сейчас спрятано (0, если прятка не активна)."""
-    if await storage.cooldown_left_secs(tg_id, HIDE_KEY) <= 0:
-        return 0
-    try:
-        return int(await storage.get_meta(hidden_meta_key(tg_id)) or 0)
-    except ValueError:
-        return 0
+    return await storage.hidden_now(tg_id)
 
 
 async def grant(bot: Bot, tg_id: int, amount: int, *, dirty: bool = False) -> None:

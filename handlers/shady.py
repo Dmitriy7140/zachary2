@@ -14,8 +14,8 @@ from aiogram.utils.markdown import hlink
 
 from content.shady import hide_message
 from db import storage
-from game.taxman import (HIDE_CAP, HIDE_CAP_IPHONE, HIDE_KEY, HIDE_MINUTES, active_hidden,
-                         hidden_meta_key)
+from game.taxman import (HIDE_CAP, HIDE_CAP_IPHONE, HIDE_CD_KEY, HIDE_COOLDOWN_MIN, HIDE_KEY,
+                         HIDE_MINUTES, active_hidden, hidden_meta_key)
 from utils.guards import ensure_private, with_owner
 from utils.notify import announce
 
@@ -37,12 +37,16 @@ async def _render(message, tg_id: int) -> None:
         f"Лимит прятки: {HIDE_CAP} Z. Владельцам айфона — {HIDE_CAP_IPHONE}: "
         "пятая тысяча прячется в жопу, а очко растянуто айфоном.",
         f"Прятка держится {HIDE_MINUTES} минуты — вся соль в том, чтобы "
-        "подгадать момент.",
+        f"подгадать момент. Кд между прятками — {HIDE_COOLDOWN_MIN} минут.",
     ]
     hidden = await active_hidden(tg_id)
     if hidden > 0:
         left = await storage.cooldown_left_secs(tg_id, HIDE_KEY)
         lines.append(f"\n🧦 Сейчас спрятано: <b>{hidden} Z</b> (ещё {left // 60}м {left % 60}с)")
+    else:
+        cd = await storage.cooldown_left_secs(tg_id, HIDE_CD_KEY)
+        if cd > 0:
+            lines.append(f"\n🕐 Снова прятать можно через {cd // 60}м {cd % 60}с")
     rows = [
         [InlineKeyboardButton(text="🧦 Спрятать бабки", callback_data="shady:hide")],
         [InlineKeyboardButton(text="⬅️ К финансам", callback_data="menu:finance"),
@@ -74,6 +78,12 @@ async def shady_hide(cb: CallbackQuery, bot: Bot):
         return await cb.answer(f"Уже всё спрятано! Держится ещё {left // 60}м {left % 60}с",
                                show_alert=True)
 
+    cd = await storage.cooldown_left_secs(tg_id, HIDE_CD_KEY)
+    if cd > 0:
+        return await cb.answer(
+            f"⏳ Организм ещё не отошёл от прошлой прятки. Жди {cd // 60}м {cd % 60}с",
+            show_alert=True)
+
     dirty = await storage.get_dirty(tg_id)
     if dirty <= 0:
         return await cb.answer("Прятать нечего — грязных денег нет 🤷", show_alert=True)
@@ -84,8 +94,11 @@ async def shady_hide(cb: CallbackQuery, bot: Bot):
     # хотел спрятать пятую тысячу, но очко растянуто айфоном
     iphone_blocked = has_iphone and dirty > HIDE_CAP_IPHONE
 
-    until = (datetime.now() + timedelta(minutes=HIDE_MINUTES)).isoformat()
-    await storage.set_cooldown_until(tg_id, HIDE_KEY, until)
+    now = datetime.now()
+    await storage.set_cooldown_until(
+        tg_id, HIDE_KEY, (now + timedelta(minutes=HIDE_MINUTES)).isoformat())
+    await storage.set_cooldown_until(
+        tg_id, HIDE_CD_KEY, (now + timedelta(minutes=HIDE_COOLDOWN_MIN)).isoformat())
     await storage.set_meta(hidden_meta_key(tg_id), str(amount))
 
     who = hlink(cb.from_user.full_name, f"tg://user?id={tg_id}")

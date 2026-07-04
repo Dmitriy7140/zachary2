@@ -129,6 +129,7 @@ async def thief_steal(cb: CallbackQuery, bot: Bot):
     if not target:
         return await cb.answer("Грабить некого — на районе пусто 🤷", show_alert=True)
     t_id, t_nick, t_wealth = target
+    t_wealth -= await storage.hidden_now(t_id)  # спрятанное в носках не украсть
     thief = hlink(cb.from_user.full_name, f"tg://user?id={tg_id}")
     back = _back(tg_id, "menu:work")
 

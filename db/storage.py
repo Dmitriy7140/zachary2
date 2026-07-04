@@ -241,20 +241,51 @@ async def clear_playtime(until_day: str) -> None:
 
 # --- Zbucks / инвентарь / кулдауны ---
 
+# --- прятки от Густава (ключи живут тут, чтобы spend_zbucks их видел) ---
+HIDE_KEY = "gustav_hide"
+HIDE_CD_KEY = "gustav_hide_cd"
+
+
+def hidden_meta_key(tg_id: int) -> str:
+    return f"gustav_hidden:{tg_id}"
+
+
+async def hidden_now(tg_id: int) -> int:
+    """Сколько Z сейчас спрятано от Густава (0 — прятка не активна)."""
+    cur = await _db.execute(
+        "SELECT used_at FROM cooldowns WHERE tg_id = ? AND game = ?", (tg_id, HIDE_KEY)
+    )
+    row = await cur.fetchone()
+    if not row or datetime.fromisoformat(row[0]) <= datetime.now():
+        return 0
+    val = await get_meta(hidden_meta_key(tg_id))
+    try:
+        return int(val or 0)
+    except ValueError:
+        return 0
+
+
 async def spend_zbucks(tg_id: int, amount: int) -> bool:
     """Списать Zbucks. False, если не хватает.
 
-    Первыми всегда тратятся ГРЯЗНЫЕ деньги — так от них можно избавиться,
-    пока Густав едет с проверкой.
+    Спрятанные от Густава деньги потратить нельзя — они заняты в носках.
+    Из доступного первыми тратятся ГРЯЗНЫЕ (не спрятанные) — так от них
+    можно избавиться, пока Густав едет с проверкой.
     """
-    cur = await _db.execute("SELECT zbucks FROM profiles WHERE tg_id = ?", (tg_id,))
+    cur = await _db.execute(
+        "SELECT zbucks, dirty FROM profiles WHERE tg_id = ?", (tg_id,)
+    )
     row = await cur.fetchone()
-    if not row or row[0] < amount:
+    if not row:
         return False
+    balance, dirty = row[0], row[1] or 0
+    hidden = await hidden_now(tg_id)
+    if balance - hidden < amount:
+        return False
+    dirty_spend = min(amount, max(0, dirty - hidden))
     await _db.execute(
-        "UPDATE profiles SET zbucks = zbucks - ?, dirty = MAX(0, dirty - ?) "
-        "WHERE tg_id = ?",
-        (amount, amount, tg_id),
+        "UPDATE profiles SET zbucks = zbucks - ?, dirty = dirty - ? WHERE tg_id = ?",
+        (amount, dirty_spend, tg_id),
     )
     await _db.commit()
     return True
