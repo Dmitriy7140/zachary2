@@ -24,6 +24,10 @@ ITEMS: dict[str, Item] = {
     "iphone": Item("iphone", "Айфон", "📱", max_qty=1, price=2000),
     "samsung": Item("samsung", "Самсунг", "📲", max_qty=1, price=1000),
     "bike": Item("bike", "Велосипед Братан", "🚲", max_qty=1, price=3000),
+    # тачки (нужна любая для апгрейда бизнеса до 2 ур.; флексим самой дорогой)
+    "car_merch": Item("car_merch", "Тачка Мерчердс", "🚗", max_qty=1, price=6999),
+    "car_panos": Item("car_panos", "Тачка Панос", "🚙", max_qty=1, price=7999),
+    "car_mubiesi": Item("car_mubiesi", "Тачка Мубиеси", "🏎", max_qty=1, price=8999),
     # рыбалка
     "rod": Item("rod", "Удочка", "🎣", max_qty=1, price=500),
     "bait_1": Item("bait_1", "Приманка на 🐟", "🪱", max_qty=99, price=55),
@@ -38,6 +42,13 @@ ITEMS: dict[str, Item] = {
     # запрещёнка (Фарцовщик)
     "lockpicks": Item("lockpicks", "Отмычки", "🗝", max_qty=1, price=5000, blackmarket=True),
     "cross": Item("cross", "Православный крест", "✝️", max_qty=1, price=10000, blackmarket=True),
+    # продукция бизнесов (пока продаётся на рынке, потом пойдёт в производство)
+    "egg": Item("egg", "Яйцо", "🥚", max_qty=99,
+                sell_min=20, sell_max=40, sell_minutes_per_z=10),
+    "corn": Item("corn", "Кукуруза", "🌽", max_qty=99,
+                 sell_min=30, sell_max=50, sell_minutes_per_z=10),
+    "potato": Item("potato", "Картофель", "🥔", max_qty=99,
+                   sell_min=40, sell_max=60, sell_minutes_per_z=10),
 }
 
 

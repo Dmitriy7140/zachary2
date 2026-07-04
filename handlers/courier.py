@@ -8,6 +8,7 @@ from aiogram.utils.markdown import hlink
 
 from content.courier import DIR_LABELS, PARABLES, bratan
 from db import storage
+from game.cars import flex_line
 from game.courier import (BIKE_REWARD, BRATAN_CHANCE, COOLDOWN_MIN, FOOT_REWARD, IPHONE_FAIL,
                           IPHONE_GLITCH, ROUNDS)
 from game.taxman import grant
@@ -148,4 +149,5 @@ async def _finish(bot: Bot, tg_id: int, prefix: str = "") -> None:
     await _edit(bot, g, f"{prefix}🛵 <b>Смена окончена!</b>\nРаботал {mode_name}, "
                         f"заработал <b>{score} Z</b>.", back_menu(tg_id))
     mention = hlink(g["name"], f"tg://user?id={tg_id}")
-    await announce(bot, f"🛵 {mention} отработал смену {mode_name} и наварил {score} Z.")
+    await announce(bot, f"🛵 {mention} отработал смену {mode_name} и наварил {score} Z."
+                        + await flex_line(tg_id))

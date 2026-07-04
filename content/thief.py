@@ -58,11 +58,12 @@ _SUCCESS = {
         "🔩 У {target} взять было особо нечего, наскрёб по мелочи. +{amount} Z.",
     ],
 }
+# в тред — без сумм: о размере улова говорит только качество кражи
 _SUCCESS_CHAT = {
-    "КУ": "💀 {thief} подчистую обнёс {target} на {amount} Z! Тот остался без штанов.",
-    "ВУ": "🕶 {thief} крупно обчистил {target} — увёл {amount} Z.",
-    "НОУ": "📺 {thief} вынес у {target} добра на {amount} Z.",
-    "СБ": "🔩 {thief} наскрёб у {target} по мелочи — {amount} Z. Стыдоба, но воровство.",
+    "КУ": "💀 {thief} подчистую обнёс {target} — тот остался без штанов. Работа мастера.",
+    "ВУ": "🕶 {thief} крупно обчистил {target}. Унёс почти всё, что было.",
+    "НОУ": "📺 {thief} вынес у {target} первый попавшийся телевизор. Тоже улов.",
+    "СБ": "🔩 {thief} наскрёб у {target} по мелочи. Стыдоба, но воровство.",
 }
 
 
@@ -82,5 +83,5 @@ def success(quality: str, target: str, amount: int) -> str:
     return random.choice(_SUCCESS[quality]).format(target=target, amount=amount)
 
 
-def success_chat(quality: str, thief: str, target: str, amount: int) -> str:
-    return _SUCCESS_CHAT[quality].format(thief=thief, target=target, amount=amount)
+def success_chat(quality: str, thief: str, target: str) -> str:
+    return _SUCCESS_CHAT[quality].format(thief=thief, target=target)

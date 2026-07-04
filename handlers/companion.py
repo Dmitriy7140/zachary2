@@ -40,11 +40,13 @@ async def _profile_card(profile: tuple) -> str:
     dirty_line = f"🧾 Из них грязные бабки: <b>{dirty} Z</b>"
     if dirty:
         dirty_line += " — холщовый еблет уже принюхивается"
+    se = "✅ оформлена" if await storage.is_self_employed(tg_id) else "❌ нет"
     return (
         f"👤 <b>{nick}</b>\n"
         f"⭐ Уровень <b>{level}</b> — {rank(level)}\n"
         f"✨ Опыт: {here} / {need} (до уровня {level + 1})\n"
         f"{fish_line}\n"
+        f"📱 Самозанятость: {se}\n"
         f"💰 Всего денег: <b>{zbucks} Z</b>\n"
         f"{dirty_line}"
     )

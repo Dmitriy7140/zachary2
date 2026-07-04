@@ -12,6 +12,7 @@ from content.items_fun import (bike_ride, bike_ride_chat, milk_drink, milk_drink
                                milk_shake_chat, rod_wave, rod_wave_chat)
 from content.phone import iphone_butt
 from content.shady import iphone_trash
+from content.zhmyzhko import corn_throw, egg_smash
 from db import storage
 from game.items import ITEMS
 from keyboards import back_menu
@@ -30,6 +31,8 @@ ACTIONS = {
     "bike": [("ride", "🚲 Покататься на велике")],
     "milk_can": [("shake", "🥤 Взболтать"), ("drink", "🥛 Попить")],
     "rod": [("wave", "🎣 Помахать удочкой")],
+    "egg": [("smash", "🥚 Разбить себе об лоб")],
+    "corn": [("throw", "🗑 Выкинуть")],
 }
 
 
@@ -112,6 +115,18 @@ async def item_action(cb: CallbackQuery, bot: Bot):
     elif key == "rod" and action == "wave":
         await cb.answer(rod_wave(), show_alert=True)
         await announce(bot, rod_wave_chat(_mention(cb)))
+    elif key == "egg" and action == "smash":
+        # яйцо уничтожается, Жмыжко ругается в треде
+        if not await storage.remove_item(tg_id, "egg", 1):
+            return await cb.answer("Яиц уже нет", show_alert=True)
+        await announce(bot, egg_smash(_mention(cb)))
+        await cb.answer("🥚 Хрясь! Со лба капает. Пан Жмыжко уже в курсе.", show_alert=True)
+    elif key == "corn" and action == "throw":
+        # кукуруза уничтожается, тред осуждает
+        if not await storage.remove_item(tg_id, "corn", 1):
+            return await cb.answer("Кукурузы уже нет", show_alert=True)
+        await announce(bot, corn_throw(_mention(cb)))
+        await cb.answer("🌽 Выкинул. Деревня осуждает.", show_alert=True)
     else:
         await cb.answer()
 

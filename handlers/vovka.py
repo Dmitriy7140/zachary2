@@ -14,6 +14,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from aiogram.utils.markdown import hlink
 
 from db import storage
+from game.cars import flex_line
 from game.taxman import grant
 from keyboards import back_menu
 from utils.guards import ensure_private
@@ -296,4 +297,4 @@ async def _finish(bot: Bot, tg_id: int) -> None:
         thread_text = f"🥊 {mention} отлупил Вовку — {wins}/{ROUNDS} побед, забрал {reward} Z!"
     else:
         thread_text = f"🥊 {mention} бил Вовку, но позорно слил ({wins}/{ROUNDS})."
-    await announce(bot, thread_text)
+    await announce(bot, thread_text + await flex_line(tg_id))

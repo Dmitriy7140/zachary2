@@ -8,15 +8,16 @@ from aiogram.enums import ParseMode
 from config import config
 from db import storage
 from game.bets import run_bets_scheduler
+from game.business import run_business_scheduler
 from game.daily import run_daily_scheduler
 from game.debts import run_debts_scheduler
 from game.fishing import run_fishing_scheduler
 from game.market import run_market_scheduler
 from game.richest import run_richest_watcher
 from game.taxman import run_gustav_scheduler
-from handlers import (admin, bets, cashier, companion, courier, farca, finance, fishing,
-                      inventory, loan, market, minigames, pranks, registration, roulette,
-                      scammer, shady, shop, stats, vovka, work)
+from handlers import (admin, bets, business, cashier, companion, courier, farca, finance,
+                      fishing, inventory, loan, market, minigames, pranks, registration,
+                      roulette, scammer, shady, shop, stats, vovka, work)
 from mc.poller import run_poller
 
 logging.basicConfig(
@@ -52,6 +53,7 @@ async def main() -> None:
     dp.include_router(loan.router)
     dp.include_router(finance.router)
     dp.include_router(shady.router)
+    dp.include_router(business.router)
     dp.include_router(pranks.router)
     dp.include_router(companion.router)
 
@@ -66,6 +68,7 @@ async def main() -> None:
     richest_task = asyncio.create_task(run_richest_watcher(bot))
     fishing_task = asyncio.create_task(run_fishing_scheduler(bot))
     gustav_task = asyncio.create_task(run_gustav_scheduler(bot))
+    business_task = asyncio.create_task(run_business_scheduler(bot))
 
     logging.info("Бот запущен")
     try:
@@ -79,6 +82,7 @@ async def main() -> None:
         richest_task.cancel()
         fishing_task.cancel()
         gustav_task.cancel()
+        business_task.cancel()
 
 
 if __name__ == "__main__":

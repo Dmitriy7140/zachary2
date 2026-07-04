@@ -8,8 +8,9 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 from aiogram.utils.markdown import hlink
 
-from content.scammer import CHARACTERS, hint
+from content.scammer import CHARACTERS, hint, scam_chat
 from db import storage
+from game.cars import flex_line
 from game.scammer import ATTEMPTS, COOLDOWN_MIN, ROUNDS, WINDOW, WINDOW_CROSS, reward
 from game.taxman import grant
 from keyboards import back_menu
@@ -128,4 +129,5 @@ async def _finish(bot: Bot, tg_id: int, state: FSMContext, prefix: str = "") -> 
     await _say(bot, g, f"{prefix}📞 <b>Обзвон окончен!</b>\nНаварил: <b>{score} Z</b>",
                 back_menu(tg_id))
     mention = hlink(g["name"], f"tg://user?id={tg_id}")
-    await announce(bot, f"📞 {mention} обзвонил доверчивых граждан и наварил {score} Z.")
+    # в тред — без сумм, только масштаб навара
+    await announce(bot, scam_chat(mention, score) + await flex_line(tg_id))

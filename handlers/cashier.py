@@ -9,6 +9,7 @@ from aiogram.utils.markdown import hlink
 
 from content.cashier import BAD, GOOD, zhmyzhko
 from db import storage
+from game.cars import flex_line
 from game.cashier import (COOLDOWN_MIN, GALYA_BONUS, GALYA_TIME, LEVEL_NAMES, OTMENA_CHANCE,
                           ROUNDS, ZHMYZHKO_CHANCE, level)
 from game.taxman import grant
@@ -199,4 +200,4 @@ async def _finish(bot: Bot, tg_id: int) -> None:
 
     mention = hlink(state["name"], f"tg://user?id={tg_id}")
     await announce(bot, f"🛒 {mention} отработал смену кассиром: заработал <b>{payout} Z</b>, "
-                        f"пикнул {picks} товаров.")
+                        f"пикнул {picks} товаров." + await flex_line(tg_id))

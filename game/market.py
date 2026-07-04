@@ -29,19 +29,21 @@ async def run_market_scheduler(bot: Bot) -> None:
 
 
 async def _process_due(bot: Bot) -> None:
-    for lid, tg_id, item, price in await storage.due_listings(datetime.now().isoformat()):
+    for lid, tg_id, item, price, qty in await storage.due_listings(datetime.now().isoformat()):
         await storage.remove_listing(lid)
-        await grant(bot, tg_id, price)  # продажа на рынке — легальна
-        await storage.bump(tg_id, f"sold_{item}")
+        total = price * (qty or 1)
+        await grant(bot, tg_id, total)  # продажа на рынке — легальна
+        await storage.bump(tg_id, f"sold_{item}", qty or 1)
         it = ITEMS.get(item)
         label = f"{it.emoji} {it.name}" if it else item
+        cnt = f" ×{qty}" if (qty or 1) > 1 else ""
 
         try:
-            await bot.send_message(tg_id, f"🏪 Продано: {label} за <b>{price} Z</b>!")
+            await bot.send_message(tg_id, f"🏪 Продано: {label}{cnt} за <b>{total} Z</b>!")
         except Exception:
             pass
 
         profile = await storage.get_profile(tg_id)
         nick = profile[2] if profile else "Игрок"
         seller = hlink(nick, f"tg://user?id={tg_id}")
-        await announce(bot, f"🏪 {seller} продал {label} за {price} Z на рынке.\n{proletarian()}")
+        await announce(bot, f"🏪 {seller} продал {label}{cnt} за {total} Z на рынке.\n{proletarian()}")

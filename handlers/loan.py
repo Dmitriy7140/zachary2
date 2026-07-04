@@ -55,8 +55,9 @@ async def _render(message, tg_id: int, page: int = 0) -> None:
     else:
         lines.append("<b>Попросить взаймы у:</b>")
         chunk, page, pages = page_slice(players, page, PAGE_SIZE)
-        for pid, nick, zb in chunk:
-            rows.append([InlineKeyboardButton(text=f"{nick} ({zb} Z)", callback_data=f"loan:who:{pid}")])
+        # балансы игроков не показываем — сколько у кого, тайна вклада
+        for pid, nick, _zb in chunk:
+            rows.append([InlineKeyboardButton(text=nick, callback_data=f"loan:who:{pid}")])
         if pages > 1:
             rows.append(nav_row(page, pages, "loanpg:"))
 
@@ -97,8 +98,8 @@ async def loan_who(cb: CallbackQuery, state: FSMContext):
     await state.update_data(lender_id=lender_id, lender_nick=lender[2],
                             chat_id=cb.message.chat.id, msg_id=cb.message.message_id)
     await cb.message.edit_text(
-        f"🤲 Просишь в долг у <b>{lender[2]}</b> (у него {lender[3]} Z).\n"
-        f"Сколько просишь? Напиши число (не больше {lender[3]}):"
+        f"🤲 Просишь в долг у <b>{lender[2]}</b>. Сколько у него денег — не видно.\n"
+        f"Сколько просишь? Напиши число:"
     )
     await cb.answer()
 
@@ -125,7 +126,8 @@ async def loan_amount(msg: Message, state: FSMContext, bot: Bot):
         return await finish("❌ Это не число — отменено.")
     amount = int(raw)
     if amount > lender[3]:
-        return await finish(f"❌ У {lender[2]} только {lender[3]} Z — проси меньше.")
+        # сумму его баланса не палим — просто отлуп
+        return await finish(f"❌ У {lender[2]} столько нет — проси меньше.")
 
     borrower = _mention(borrower_id, msg.from_user.full_name)
     kb = _kb([[

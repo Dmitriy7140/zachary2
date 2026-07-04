@@ -1,4 +1,7 @@
 """Раздел «Работа»: Легальная (заглушка) и Нелегальная → Вор."""
+import random
+from datetime import datetime, timedelta
+
 from aiogram import Bot, F, Router
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.markdown import hlink
@@ -6,14 +9,22 @@ from aiogram.utils.markdown import hlink
 from content import thief as txt
 from db import storage
 from game.cashier import level_name as cashier_level_name
+from game.cars import flex_line
 from game.debts import chepushila_days_left, is_chepushila
 from game.taxman import grant
 from game.thief import (MIN_TARGET_WEALTH, THEFT_THRESHOLDS, is_fail, roll_quality,
                         steal_amount, thief_level)
 from utils.guards import ensure_owner, with_owner
 from utils.notify import announce
+from utils.pagination import page_slice
 
 router = Router()
+
+VICTIMS_PAGE_SIZE = 6
+
+# свежеобворованный игрок под защитой: менты кругом, второй раз не сунешься
+ROBBED_PROTECT_KEY = "robbed_protect"
+ROBBED_PROTECT_HOURS = 8
 
 
 def _kb(rows) -> InlineKeyboardMarkup:
@@ -93,6 +104,7 @@ async def work_illegal(cb: CallbackQuery):
     lines = [
         "🕶 <b>Нелегальная работа</b> · 🦹 Вор",
         f"Ранг: <b>{txt.LEVEL_NAMES[level - 1]}</b> · удачных краж: {thefts}",
+        "Со 2 уровня сам выбираешь, кого щипать.",
         "",
         "<b>Прогрессия:</b>",
     ]
@@ -125,9 +137,80 @@ async def thief_steal(cb: CallbackQuery, bot: Bot):
         return await cb.answer(f"⏳ Залечь на дно ещё {left // 3600}ч {(left % 3600) // 60}м",
                                show_alert=True)
 
-    target = await storage.random_target(tg_id)
-    if not target:
+    # со 2 уровня жертву выбираем сами; на 1-м — как повезёт
+    if thief_level(await storage.get_thefts(tg_id)) >= 2:
+        return await _choose_victim(cb)
+    players = await storage.list_other_profiles(tg_id)
+    if not players:
         return await cb.answer("Грабить некого — на районе пусто 🤷", show_alert=True)
+    random.shuffle(players)
+    target = None
+    for p in players:  # свежеобворованных пропускаем
+        if await storage.cooldown_left_secs(p[0], ROBBED_PROTECT_KEY) == 0:
+            target = p
+            break
+    if not target:
+        return await cb.answer("Всех на районе уже обнесли — люди настороже 🤷", show_alert=True)
+    await _do_steal(cb, bot, target)
+
+
+async def _choose_victim(cb: CallbackQuery, page: int = 0) -> None:
+    owner = cb.from_user.id
+    players = await storage.list_other_profiles(owner)
+    if not players:
+        return await cb.answer("Грабить некого — на районе пусто 🤷", show_alert=True)
+
+    chunk, page, pages = page_slice(players, page, VICTIMS_PAGE_SIZE)
+    # деньги жертв не показываем — щипач работает чуйкой
+    rows = [[InlineKeyboardButton(text=f"🎯 {nick}",
+                                  callback_data=with_owner(f"thief:pick:{pid}", owner))]
+            for pid, nick, _zb in chunk]
+    if pages > 1:
+        rows.append([
+            InlineKeyboardButton(text="◀️",
+                                 callback_data=with_owner(f"thiefpg:{(page - 1) % pages}", owner)),
+            InlineKeyboardButton(text=f"{page + 1}/{pages}", callback_data="noop"),
+            InlineKeyboardButton(text="▶️",
+                                 callback_data=with_owner(f"thiefpg:{(page + 1) % pages}", owner)),
+        ])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад",
+                                      callback_data=with_owner("work:illegal", owner))])
+    await cb.message.edit_text(
+        "🦹 Кого щипаем? Сколько у кого в карманах — не видно, работаем вслепую:",
+        reply_markup=_kb(rows))
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("thiefpg:"))
+async def thief_victims_page(cb: CallbackQuery):
+    if not await ensure_owner(cb):
+        return
+    await _choose_victim(cb, int(cb.data.split(":")[1]))
+
+
+@router.callback_query(F.data.startswith("thief:pick:"))
+async def thief_pick(cb: CallbackQuery, bot: Bot):
+    if not await ensure_owner(cb):
+        return
+    tg_id = cb.from_user.id
+    left = await storage.theft_cooldown_left(tg_id)
+    if left > 0:
+        return await cb.answer(f"⏳ Залечь на дно ещё {left // 3600}ч {(left % 3600) // 60}м",
+                               show_alert=True)
+    t_id = int(cb.data.split(":")[2])
+    p = await storage.get_profile(t_id)
+    if not p or t_id == tg_id:
+        return await cb.answer("Цель пропала с района 🤷", show_alert=True)
+    protect = await storage.cooldown_left_secs(t_id, ROBBED_PROTECT_KEY)
+    if protect > 0:
+        return await cb.answer(
+            f"🚔 Его уже обчистили — вокруг менты, не подойти ещё "
+            f"{protect // 3600}ч {(protect % 3600) // 60}м", show_alert=True)
+    await _do_steal(cb, bot, (t_id, p[2], p[3]))
+
+
+async def _do_steal(cb: CallbackQuery, bot: Bot, target: tuple) -> None:
+    tg_id = cb.from_user.id
     t_id, t_nick, t_wealth = target
     t_wealth -= await storage.hidden_now(t_id)  # спрятанное в носках не украсть
     thief = hlink(cb.from_user.full_name, f"tg://user?id={tg_id}")
@@ -157,10 +240,15 @@ async def thief_steal(cb: CallbackQuery, bot: Bot):
     await grant(bot, tg_id, amount, dirty=True)  # краденое — грязные деньги
     await storage.add_theft(tg_id)
     await storage.bump(t_id, "robbed")
+    # жертва под защитой: 8 часов её никто не обворует
+    await storage.set_cooldown_until(
+        t_id, ROBBED_PROTECT_KEY,
+        (datetime.now() + timedelta(hours=ROBBED_PROTECT_HOURS)).isoformat())
     await storage.set_theft_cooldown(tg_id, 12)
     await cb.message.edit_text(
         f"<b>{txt.QUALITY_NAMES[quality]}</b>\n\n{txt.success(quality, t_nick, amount)}",
         reply_markup=back,
     )
     await cb.answer()
-    await announce(bot, txt.success_chat(quality, thief, t_nick, amount))
+    await announce(bot, txt.success_chat(quality, thief, t_nick)
+                   + await flex_line(tg_id))

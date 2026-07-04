@@ -112,6 +112,28 @@ async def init() -> None:
             bait_tier INTEGER,
             catch_at  TEXT
         );
+
+        -- бизнесы игроков (tier: small/medium/large — малый/средний/крупный)
+        CREATE TABLE IF NOT EXISTS businesses (
+            tg_id       INTEGER,
+            biz         TEXT,
+            tier        TEXT,
+            level       INTEGER DEFAULT 1,
+            custom_name TEXT,
+            paused      INTEGER DEFAULT 0,
+            produce_at  TEXT,
+            upkeep_at   TEXT,
+            bought_at   TEXT DEFAULT (datetime('now')),
+            PRIMARY KEY (tg_id, biz)
+        );
+
+        -- отмыв грязных денег через бизнес: закладка вернётся чистой в ready_at
+        CREATE TABLE IF NOT EXISTS laundering (
+            id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            tg_id    INTEGER,
+            amount   INTEGER,
+            ready_at TEXT
+        );
         """
     )
     # миграции для уже существующей БД
@@ -121,6 +143,10 @@ async def init() -> None:
     await _ensure_column("profiles", "honest", "INTEGER DEFAULT 0")
     # грязные деньги (Густав Налоговик); default 0 = все текущие балансы легальны
     await _ensure_column("profiles", "dirty", "INTEGER DEFAULT 0")
+    # самозанятость (оформляется через Самсунг, нужна для покупки бизнеса)
+    await _ensure_column("profiles", "self_employed", "INTEGER DEFAULT 0")
+    # рынок: лот может содержать несколько штук по одной цене
+    await _ensure_column("market", "qty", "INTEGER DEFAULT 1")
     await _db.commit()
 
 
@@ -368,26 +394,27 @@ async def remove_item(tg_id: int, item: str, qty: int = 1) -> bool:
 
 # --- рынок ---
 
-async def add_listing(tg_id: int, item: str, price: int, sell_at: str) -> None:
+async def add_listing(tg_id: int, item: str, price: int, sell_at: str, qty: int = 1) -> None:
     await _db.execute(
-        "INSERT INTO market (tg_id, item, price, sell_at) VALUES (?, ?, ?, ?)",
-        (tg_id, item, price, sell_at),
+        "INSERT INTO market (tg_id, item, price, sell_at, qty) VALUES (?, ?, ?, ?, ?)",
+        (tg_id, item, price, sell_at, qty),
     )
     await _db.commit()
 
 
 async def get_listings(tg_id: int) -> list[tuple]:
-    """Активные продажи игрока: (item, price, sell_at)."""
+    """Активные продажи игрока: (item, price, sell_at, qty)."""
     cur = await _db.execute(
-        "SELECT item, price, sell_at FROM market WHERE tg_id = ? ORDER BY sell_at", (tg_id,)
+        "SELECT item, price, sell_at, qty FROM market WHERE tg_id = ? ORDER BY sell_at",
+        (tg_id,),
     )
     return await cur.fetchall()
 
 
 async def due_listings(now_iso: str) -> list[tuple]:
-    """Продажи, у которых вышел срок: (id, tg_id, item, price)."""
+    """Продажи, у которых вышел срок: (id, tg_id, item, price, qty)."""
     cur = await _db.execute(
-        "SELECT id, tg_id, item, price FROM market WHERE sell_at <= ?", (now_iso,)
+        "SELECT id, tg_id, item, price, qty FROM market WHERE sell_at <= ?", (now_iso,)
     )
     return await cur.fetchall()
 
@@ -720,6 +747,147 @@ async def clear_inventory(tg_id: int) -> int:
     cur = await _db.execute("DELETE FROM inventory WHERE tg_id = ?", (tg_id,))
     await _db.commit()
     return cur.rowcount
+
+
+# --- самозанятость и бизнесы ---
+
+async def is_self_employed(tg_id: int) -> bool:
+    cur = await _db.execute("SELECT self_employed FROM profiles WHERE tg_id = ?", (tg_id,))
+    row = await cur.fetchone()
+    return bool(row and row[0])
+
+
+async def set_self_employed(tg_id: int) -> None:
+    await _db.execute("UPDATE profiles SET self_employed = 1 WHERE tg_id = ?", (tg_id,))
+    await _db.commit()
+
+
+async def self_employed_ids() -> list[int]:
+    cur = await _db.execute("SELECT tg_id FROM profiles WHERE self_employed = 1")
+    return [r[0] for r in await cur.fetchall()]
+
+
+async def create_business(tg_id: int, biz: str, tier: str,
+                          produce_at: str, upkeep_at: str) -> bool:
+    """Создать бизнес. False — такой у игрока уже есть."""
+    try:
+        await _db.execute(
+            """INSERT INTO businesses (tg_id, biz, tier, produce_at, upkeep_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (tg_id, biz, tier, produce_at, upkeep_at),
+        )
+        await _db.commit()
+        return True
+    except aiosqlite.IntegrityError:
+        return False
+
+
+async def get_business(tg_id: int, biz: str) -> tuple | None:
+    """(tier, level, custom_name, paused) или None."""
+    cur = await _db.execute(
+        "SELECT tier, level, custom_name, paused FROM businesses WHERE tg_id = ? AND biz = ?",
+        (tg_id, biz),
+    )
+    return await cur.fetchone()
+
+
+async def set_business_name(tg_id: int, biz: str, name: str) -> None:
+    await _db.execute(
+        "UPDATE businesses SET custom_name = ? WHERE tg_id = ? AND biz = ?",
+        (name, tg_id, biz),
+    )
+    await _db.commit()
+
+
+async def set_business_level(tg_id: int, biz: str, level: int) -> None:
+    await _db.execute(
+        "UPDATE businesses SET level = ? WHERE tg_id = ? AND biz = ?",
+        (level, tg_id, biz),
+    )
+    await _db.commit()
+
+
+async def set_business_paused(tg_id: int, biz: str, paused: bool) -> None:
+    await _db.execute(
+        "UPDATE businesses SET paused = ? WHERE tg_id = ? AND biz = ?",
+        (1 if paused else 0, tg_id, biz),
+    )
+    await _db.commit()
+
+
+async def due_production(now_iso: str) -> list[tuple]:
+    """Бизнесы, которым пора выдать продукцию: (tg_id, biz, level, custom_name)."""
+    cur = await _db.execute(
+        """SELECT tg_id, biz, level, custom_name FROM businesses
+           WHERE produce_at <= ? AND paused = 0""",
+        (now_iso,),
+    )
+    return await cur.fetchall()
+
+
+async def set_produce_at(tg_id: int, biz: str, next_iso: str) -> None:
+    await _db.execute(
+        "UPDATE businesses SET produce_at = ? WHERE tg_id = ? AND biz = ?",
+        (next_iso, tg_id, biz),
+    )
+    await _db.commit()
+
+
+async def due_upkeep(now_iso: str) -> list[tuple]:
+    """Бизнесы, которым пора списать содержание: (tg_id, biz, level, custom_name, paused)."""
+    cur = await _db.execute(
+        """SELECT tg_id, biz, level, custom_name, paused FROM businesses
+           WHERE upkeep_at <= ?""",
+        (now_iso,),
+    )
+    return await cur.fetchall()
+
+
+async def set_upkeep_at(tg_id: int, biz: str, next_iso: str) -> None:
+    await _db.execute(
+        "UPDATE businesses SET upkeep_at = ? WHERE tg_id = ? AND biz = ?",
+        (next_iso, tg_id, biz),
+    )
+    await _db.commit()
+
+
+# --- отмыв грязных денег ---
+
+async def add_laundering(tg_id: int, amount: int, ready_at: str) -> None:
+    await _db.execute(
+        "INSERT INTO laundering (tg_id, amount, ready_at) VALUES (?, ?, ?)",
+        (tg_id, amount, ready_at),
+    )
+    await _db.commit()
+
+
+async def laundering_active_sum(tg_id: int) -> int:
+    """Сколько Z сейчас в стирке у игрока."""
+    cur = await _db.execute(
+        "SELECT COALESCE(SUM(amount), 0) FROM laundering WHERE tg_id = ?", (tg_id,)
+    )
+    return (await cur.fetchone())[0]
+
+
+async def get_launderings(tg_id: int) -> list[tuple]:
+    """Активные закладки игрока: (amount, ready_at)."""
+    cur = await _db.execute(
+        "SELECT amount, ready_at FROM laundering WHERE tg_id = ? ORDER BY ready_at", (tg_id,)
+    )
+    return await cur.fetchall()
+
+
+async def due_laundering(now_iso: str) -> list[tuple]:
+    """Закладки, которые пора вернуть чистыми: (id, tg_id, amount)."""
+    cur = await _db.execute(
+        "SELECT id, tg_id, amount FROM laundering WHERE ready_at <= ?", (now_iso,)
+    )
+    return await cur.fetchall()
+
+
+async def remove_laundering(lid: int) -> None:
+    await _db.execute("DELETE FROM laundering WHERE id = ?", (lid,))
+    await _db.commit()
 
 
 # --- воровство ---
