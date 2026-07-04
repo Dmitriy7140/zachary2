@@ -177,7 +177,7 @@ async def biz_card(cb: CallbackQuery):
     ]
     await cb.message.edit_text(
         f"{MOSQUITO_LORE}\n\n"
-        f"Цена: <b>{MOSQUITO_PRICE} Z</b> · содержание {MOSQUITO_UPKEEP} Z/день\n"
+        f"Цена: <b>{MOSQUITO_PRICE} Z</b> · содержание {upkeep_for(1)} Z/день\n"
         f"Продукция: {MOSQUITO_EGGS[0]}–{MOSQUITO_EGGS[1]} 🥚 в час",
         reply_markup=_kb(rows))
     await cb.answer()
