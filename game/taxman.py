@@ -1,7 +1,9 @@
 """Густав Налоговик: грязные деньги, тайные проверки и рейды с предупреждением.
 
-Грязные источники дохода: Вор, Телефонный мошенник, выигрыш в рулетке, взятый
-долг. Всё остальное (кассир, курьер, рынок, коза, Вовка, ставки, опыт) — легально.
+Грязные источники дохода: Вор, Телефонный мошенник, выигрыш в рулетке.
+Займы наследуют статус денег кредитора/должника (dirty_part в grant):
+сколько грязных ушло у одного — столько грязных пришло другому.
+Всё остальное (кассир, курьер, рынок, коза, Вовка, ставки, опыт) — легально.
 
 Механика: на каждой новой тысяче выше 5000 Густав ТАЙНО проверяет игрока.
 Чисто — молчит. Есть грязные — публично объявляет в тред, что выезжает с
@@ -48,8 +50,13 @@ async def active_hidden(tg_id: int) -> int:
     return await storage.hidden_now(tg_id)
 
 
-async def grant(bot: Bot, tg_id: int, amount: int, *, dirty: bool = False) -> None:
-    """Начислить доход. dirty=True — нелегальный источник."""
+async def grant(bot: Bot, tg_id: int, amount: int, *, dirty: bool = False,
+                dirty_part: int | None = None) -> None:
+    """Начислить доход.
+
+    dirty=True — вся сумма нелегальная; dirty_part=N — грязная только часть
+    (наследование статуса при займах/возвратах долгов).
+    """
     if amount <= 0:
         return
     profile = await storage.get_profile(tg_id)
@@ -58,8 +65,9 @@ async def grant(bot: Bot, tg_id: int, amount: int, *, dirty: bool = False) -> No
         return
     old = profile[3]
     await storage.add_zbucks(tg_id, amount)
-    if dirty:
-        await storage.add_dirty(tg_id, amount)
+    dirty_add = amount if dirty else min(dirty_part or 0, amount)
+    if dirty_add > 0:
+        await storage.add_dirty(tg_id, dirty_add)
     await maybe_gustav(bot, tg_id, old, old + amount)
 
 

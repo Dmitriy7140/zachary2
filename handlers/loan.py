@@ -146,7 +146,8 @@ async def loan_yes(cb: CallbackQuery, bot: Bot):
     borrower_id, amount = int(borrower_raw), int(amount_raw)
     lender_id = cb.from_user.id
 
-    if not await storage.spend_zbucks(lender_id, amount):
+    dirty_given = await storage.spend_zbucks_traced(lender_id, amount)
+    if dirty_given is None:
         await cb.message.edit_text("❌ У тебя уже нет столько Z — долг не выдан.")
         try:
             await bot.send_message(borrower_id, "😔 Кредитор передумал — у него не хватило Z.")
@@ -154,7 +155,8 @@ async def loan_yes(cb: CallbackQuery, bot: Bot):
             pass
         return await cb.answer()
 
-    await grant(bot, borrower_id, amount, dirty=True)  # взятое в долг — грязные
+    # заём наследует статус денег кредитора: сколько грязных ушло — столько пришло
+    await grant(bot, borrower_id, amount, dirty_part=dirty_given)
     lender = _mention(lender_id, cb.from_user.full_name)
     b_profile = await storage.get_profile(borrower_id)
     borrower = _mention(borrower_id, b_profile[2] if b_profile else "Игрок")
@@ -187,10 +189,12 @@ async def loan_repay(cb: CallbackQuery, bot: Bot):
     _, borrower_id, lender_id, lender_nick, amount = debt
     if borrower_id != cb.from_user.id:
         return await cb.answer("Это не твой долг", show_alert=True)
-    if not await storage.spend_zbucks(cb.from_user.id, amount):
+    dirty_back = await storage.spend_zbucks_traced(cb.from_user.id, amount)
+    if dirty_back is None:
         return await cb.answer(f"Не хватает Z (нужно {amount})", show_alert=True)
 
-    await grant(bot, lender_id, amount)  # возврат долга кредитору — чистые
+    # возврат тоже наследует статус: просадил чистые в казино — вернёшь грязными
+    await grant(bot, lender_id, amount, dirty_part=dirty_back)
     await storage.remove_debt(did)
     tg_id = cb.from_user.id
     borrower = _mention(tg_id, cb.from_user.full_name)

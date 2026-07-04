@@ -265,9 +265,10 @@ async def hidden_now(tg_id: int) -> int:
         return 0
 
 
-async def spend_zbucks(tg_id: int, amount: int) -> bool:
-    """Списать Zbucks. False, если не хватает.
+async def spend_zbucks_traced(tg_id: int, amount: int) -> int | None:
+    """Списать Zbucks и вернуть, СКОЛЬКО из списанного было грязными.
 
+    None — денег не хватает (ничего не списано).
     Спрятанные от Густава деньги потратить нельзя — они заняты в носках.
     Из доступного первыми тратятся ГРЯЗНЫЕ (не спрятанные) — так от них
     можно избавиться, пока Густав едет с проверкой.
@@ -277,18 +278,23 @@ async def spend_zbucks(tg_id: int, amount: int) -> bool:
     )
     row = await cur.fetchone()
     if not row:
-        return False
+        return None
     balance, dirty = row[0], row[1] or 0
     hidden = await hidden_now(tg_id)
     if balance - hidden < amount:
-        return False
+        return None
     dirty_spend = min(amount, max(0, dirty - hidden))
     await _db.execute(
         "UPDATE profiles SET zbucks = zbucks - ?, dirty = dirty - ? WHERE tg_id = ?",
         (amount, dirty_spend, tg_id),
     )
     await _db.commit()
-    return True
+    return dirty_spend
+
+
+async def spend_zbucks(tg_id: int, amount: int) -> bool:
+    """Списать Zbucks. False, если не хватает."""
+    return await spend_zbucks_traced(tg_id, amount) is not None
 
 
 # --- грязные деньги (Густав Налоговик) ---
