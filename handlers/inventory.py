@@ -14,6 +14,7 @@ from content.phone import iphone_butt
 from content.shady import iphone_trash
 from content.zhmyzhko import corn_throw, egg_smash
 from db import storage
+from handlers.business import do_self_employ
 from game.items import ITEMS
 from keyboards import back_menu
 from utils.guards import ensure_owner, with_owner
@@ -79,7 +80,10 @@ async def item_menu(cb: CallbackQuery):
     if not it or await storage.get_item_qty(tg_id, key) < 1:
         return await cb.answer("Этого предмета уже нет", show_alert=True)
 
-    actions = ACTIONS.get(key, [])
+    actions = list(ACTIONS.get(key, []))
+    # Госуслуги живут в Самсунге: оформление самозанятости — только отсюда
+    if key == "samsung" and not await storage.is_self_employed(tg_id):
+        actions.append(("selfemploy", "📱 Оформить самозанятость — 1000 Z"))
     rows = [[InlineKeyboardButton(text=label, callback_data=with_owner(f"invact:{key}:{act}", tg_id))]
             for act, label in actions]
     rows.append([InlineKeyboardButton(text="⬅️ К инвентарю", callback_data=with_owner("menu:inventory", tg_id))])
@@ -104,6 +108,12 @@ async def item_action(cb: CallbackQuery, bot: Bot):
         await _iphone_trash(cb, bot, tg_id)
     elif key == "samsung" and action == "write":
         await _samsung_write(cb, tg_id)
+    elif key == "samsung" and action == "selfemploy":
+        if await do_self_employ(cb, bot):
+            await cb.message.edit_text(
+                "📱 Самозанятость оформлена через Госуслуги на Самсунге. "
+                "ФНС уже потирает руки: −200 Z/день.",
+                reply_markup=back_menu(tg_id))
     elif key == "bike" and action == "ride":
         await _bike_ride(cb, bot, tg_id)
     elif key == "milk_can" and action == "shake":

@@ -57,18 +57,15 @@ async def _render(message, tg_id: int) -> None:
     if biz is None:
         lines = ["🏢 <b>Бизнес</b>", ""]
         se_line = "📱 Самозанятость: " + (
-            f"✅ оформлена (налог {SELF_EMPLOY_TAX} Z/день)" if se else "❌ не оформлена")
+            f"✅ оформлена (налог −{SELF_EMPLOY_TAX} Z/день)" if se
+            else "❌ не оформлена — оформляется в 🎒 Инвентарь → Самсунг")
         lines.append(se_line)
         lines.append("")
         lines.append("Доступно к покупке:")
         rows = [[InlineKeyboardButton(text=f"🦟 {DEFAULT_NAME} — {MOSQUITO_PRICE} Z",
-                                      callback_data="biz:card")]]
-        if not se:
-            rows.append([InlineKeyboardButton(
-                text=f"📱 Самозанятость — {SELF_EMPLOY_COST} Z (+{SELF_EMPLOY_TAX}/день)",
-                callback_data="biz:selfemploy")])
-        rows.append([InlineKeyboardButton(text="⬅️ В меню",
-                                          callback_data=with_owner("menu:main", tg_id))])
+                                      callback_data="biz:card")],
+                [InlineKeyboardButton(text="⬅️ В меню",
+                                      callback_data=with_owner("menu:main", tg_id))]]
         await message.edit_text("\n".join(lines), reply_markup=_kb(rows))
         return
 
@@ -120,28 +117,31 @@ async def business_menu(cb: CallbackQuery):
     await cb.answer()
 
 
-# ---------- самозанятость ----------
+# ---------- самозанятость (кнопка живёт в Инвентарь → Самсунг) ----------
 
-@router.callback_query(F.data == "biz:selfemploy")
-async def biz_selfemploy(cb: CallbackQuery, bot: Bot):
-    if not await ensure_private(cb):
-        return
+async def do_self_employ(cb: CallbackQuery, bot: Bot) -> bool:
+    """Оформить самозанятость. True — оформили (алерты шлёт сама)."""
     tg_id = cb.from_user.id
     if await storage.is_self_employed(tg_id):
-        return await cb.answer("Ты уже самозанятый 😉", show_alert=True)
+        await cb.answer("Ты уже самозанятый 😉", show_alert=True)
+        return False
 
     has_samsung = await storage.get_item_qty(tg_id, "samsung") > 0
     has_iphone = await storage.get_item_qty(tg_id, "iphone") > 0
     if not has_samsung:
         if has_iphone:
-            return await cb.answer(
+            await cb.answer(
                 "📱 С айфона Госуслуги не работают — крутится колёсико и вылетает. "
                 "Нужен Самсунг.", show_alert=True)
-        return await cb.answer("📱 Нужен Самсунг — Госуслуги сами себя не откроют", show_alert=True)
+        else:
+            await cb.answer("📱 Нужен Самсунг — Госуслуги сами себя не откроют",
+                            show_alert=True)
+        return False
 
     if not await storage.spend_zbucks(tg_id, SELF_EMPLOY_COST):
-        return await cb.answer(f"Не хватает Z (регистрация {SELF_EMPLOY_COST}, "
-                               f"дальше налог {SELF_EMPLOY_TAX} Z/день)", show_alert=True)
+        await cb.answer(f"Не хватает Z (регистрация {SELF_EMPLOY_COST}, "
+                        f"дальше налог −{SELF_EMPLOY_TAX} Z/день)", show_alert=True)
+        return False
 
     await storage.set_self_employed(tg_id)
     # первый налог — через сутки, дальше планировщик сам
@@ -150,7 +150,16 @@ async def biz_selfemploy(cb: CallbackQuery, bot: Bot):
     await announce(bot, self_employed(_mention(tg_id, cb.from_user.full_name)))
     await cb.answer(f"📱 Самозанятость оформлена! Теперь ФНС будет откусывать "
                     f"{SELF_EMPLOY_TAX} Z в день.", show_alert=True)
-    await _render(cb.message, tg_id)
+    return True
+
+
+@router.callback_query(F.data == "biz:selfemploy")
+async def biz_selfemploy(cb: CallbackQuery, bot: Bot):
+    """Старые кнопки в чатах: работают, но новая точка входа — Самсунг в инвентаре."""
+    if not await ensure_private(cb):
+        return
+    if await do_self_employ(cb, bot):
+        await _render(cb.message, cb.from_user.id)
 
 
 # ---------- карточка и покупка ----------
@@ -181,10 +190,15 @@ async def biz_buy(cb: CallbackQuery, bot: Bot, state: FSMContext):
     tg_id = cb.from_user.id
     if await storage.get_business(tg_id, BIZ_MOSQUITO):
         return await cb.answer("У тебя уже есть этот бизнес", show_alert=True)
+    # сначала про деньги, и только при полном кошельке — про самозанятость
+    profile = await storage.get_profile(tg_id)
+    available = (profile[3] if profile else 0) - await storage.hidden_now(tg_id)
+    if available < MOSQUITO_PRICE:
+        return await cb.answer(f"Не хватает Z (нужно {MOSQUITO_PRICE})", show_alert=True)
     if not await storage.is_self_employed(tg_id):
         return await cb.answer(
-            "📱 Без самозанятости бизнес не оформить — сначала зарегистрируйся "
-            "через Самсунг (кнопка в меню Бизнес)", show_alert=True)
+            "📱 Деньги есть, а бумажек нет! Без самозанятости бизнес не оформить — "
+            "открой 🎒 Инвентарь → Самсунг и жми «Оформить самозанятость»", show_alert=True)
     if not await storage.spend_zbucks(tg_id, MOSQUITO_PRICE):
         return await cb.answer(f"Не хватает Z (нужно {MOSQUITO_PRICE})", show_alert=True)
 
