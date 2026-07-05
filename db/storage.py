@@ -134,6 +134,15 @@ async def init() -> None:
             amount   INTEGER,
             ready_at TEXT
         );
+
+        -- рыночный сток («стакан»): всё, что продали игроки, лежит тут
+        -- и продаётся другим с наценкой; price — уже цена ПОКУПКИ
+        CREATE TABLE IF NOT EXISTS market_stock (
+            item  TEXT,
+            price INTEGER,
+            qty   INTEGER DEFAULT 0,
+            PRIMARY KEY (item, price)
+        );
         """
     )
     # миграции для уже существующей БД
@@ -422,6 +431,56 @@ async def due_listings(now_iso: str) -> list[tuple]:
 async def remove_listing(listing_id: int) -> None:
     await _db.execute("DELETE FROM market WHERE id = ?", (listing_id,))
     await _db.commit()
+
+
+async def active_listing_qty(tg_id: int) -> int:
+    """Сколько штук у игрока сейчас в активной продаже (лимит 20)."""
+    cur = await _db.execute(
+        "SELECT COALESCE(SUM(qty), 0) FROM market WHERE tg_id = ?", (tg_id,)
+    )
+    return (await cur.fetchone())[0]
+
+
+# --- рыночный сток («стакан» покупки) ---
+
+async def add_stock(item: str, price: int, qty: int) -> None:
+    await _db.execute(
+        """INSERT INTO market_stock (item, price, qty) VALUES (?, ?, ?)
+           ON CONFLICT (item, price) DO UPDATE SET qty = qty + excluded.qty""",
+        (item, price, qty),
+    )
+    await _db.commit()
+
+
+async def get_stock() -> list[tuple]:
+    """Весь стакан: (item, price, qty), qty > 0."""
+    cur = await _db.execute(
+        "SELECT item, price, qty FROM market_stock WHERE qty > 0 ORDER BY item, price"
+    )
+    return await cur.fetchall()
+
+
+async def take_stock(item: str, price: int, n: int) -> int:
+    """Снять со стока до n штук. Вернуть, сколько реально сняли."""
+    cur = await _db.execute(
+        "SELECT qty FROM market_stock WHERE item = ? AND price = ?", (item, price)
+    )
+    row = await cur.fetchone()
+    have = row[0] if row else 0
+    taken = min(have, n)
+    if taken <= 0:
+        return 0
+    if taken == have:
+        await _db.execute(
+            "DELETE FROM market_stock WHERE item = ? AND price = ?", (item, price)
+        )
+    else:
+        await _db.execute(
+            "UPDATE market_stock SET qty = qty - ? WHERE item = ? AND price = ?",
+            (taken, item, price),
+        )
+    await _db.commit()
+    return taken
 
 
 # --- ставки ---
