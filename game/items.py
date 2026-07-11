@@ -28,6 +28,8 @@ ITEMS: dict[str, Item] = {
     "car_merch": Item("car_merch", "Тачка Мерчердс", "🚗", max_qty=1, price=6999),
     "car_panos": Item("car_panos", "Тачка Панос", "🚙", max_qty=1, price=7999),
     "car_mubiesi": Item("car_mubiesi", "Тачка Мубиеси", "🏎", max_qty=1, price=8999),
+    # нож Ъ — пропуск на кухню (работа «Шеф»)
+    "znak": Item("znak", "Ъ", "🔪", max_qty=1, price=3500),
     # рыбалка
     "rod": Item("rod", "Удочка", "🎣", max_qty=1, price=500),
     "bait_1": Item("bait_1", "Приманка на 🐟", "🪱", max_qty=99, price=55),

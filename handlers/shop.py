@@ -3,6 +3,7 @@ from aiogram import F, Router
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.markdown import hlink
 
+from content.chef import znak_ominous
 from content.zhmyzhko import proletarian
 from db import storage
 from game.fishing import BAIT_TIER, fishing_level
@@ -78,5 +79,9 @@ async def shop_buy(cb: CallbackQuery, bot):
     await storage.add_item(tg_id, key, 1, item.max_qty)
     await cb.answer(f"Куплено: {item.emoji} {item.name}!", show_alert=True)
     buyer = hlink(cb.from_user.full_name, f"tg://user?id={tg_id}")
-    await announce(bot, f"🛒 {buyer} купил {item.emoji} {item.name} за {item.price} Z.\n{proletarian()}")
+    if key == "znak":
+        # покупка Ъ — событие зловещее, Жмыжко тут не к месту
+        await announce(bot, znak_ominous(buyer))
+    else:
+        await announce(bot, f"🛒 {buyer} купил {item.emoji} {item.name} за {item.price} Z.\n{proletarian()}")
     await _render(cb.message, tg_id)

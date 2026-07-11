@@ -17,6 +17,11 @@ from game.thief import (MIN_TARGET_WEALTH, THEFT_THRESHOLDS, is_fail, roll_quali
 from utils.guards import ensure_owner, with_owner
 from utils.notify import announce
 from utils.pagination import page_slice
+from utils.photo import show_photo_menu, show_text_menu
+
+WORK_PHOTO = "static/work.png"
+WORK_LEGAL_PHOTO = "static/work_legal.png"
+WORK_ILLEGAL_PHOTO = "static/work_illegal.png"
 
 router = Router()
 
@@ -62,7 +67,9 @@ async def work_menu(cb: CallbackQuery):
         [InlineKeyboardButton(text="🕶 Нелегальная", callback_data=with_owner("work:illegal", owner))],
         [InlineKeyboardButton(text="⬅️ В меню", callback_data=with_owner("menu:main", owner))],
     ]
-    await cb.message.edit_text("\n".join(lines), reply_markup=_kb(rows))
+    # корневой экран работы — фото хмурого города
+    await show_photo_menu(cb.message, WORK_PHOTO, "work_photo_id",
+                          "\n".join(lines), _kb(rows))
     await cb.answer()
 
 
@@ -73,9 +80,10 @@ async def work_legal(cb: CallbackQuery):
     owner = cb.from_user.id
     if await is_chepushila(owner):
         days = await chepushila_days_left(owner)
-        await cb.message.edit_text(
+        await show_text_menu(
+            cb.message,
             f"🤡 Ты «Чепушила» — легальная работа закрыта ещё ~{days} дн.\nВозвращай долги вовремя!",
-            reply_markup=_back(owner, "menu:work"),
+            _back(owner, "menu:work"),
         )
         return await cb.answer()
 
@@ -83,13 +91,17 @@ async def work_legal(cb: CallbackQuery):
     rows = [
         [InlineKeyboardButton(text="🛒 Кассир — на смену", callback_data="cashier:start")],
         [InlineKeyboardButton(text="🛵 Курьер", callback_data="courier:menu")],
+        [InlineKeyboardButton(text="👨‍🍳 Шеф — на кухню", callback_data="chef:start")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data=with_owner("menu:work", owner))],
     ]
-    await cb.message.edit_text(
+    # легалка — фото проспекта; переход с фото работ = смена медиа, не пересылка
+    await show_photo_menu(
+        cb.message, WORK_LEGAL_PHOTO, "work_legal_photo_id",
         f"✅ <b>Легальная работа</b>\n\n"
         f"🛒 Кассир — ранг: <b>{cashier_level_name(cgames)}</b> (смен: {cgames})\n"
-        f"🛵 Курьер — доставка по притчам сломанного навигатора",
-        reply_markup=_kb(rows),
+        f"🛵 Курьер — доставка по притчам сломанного навигатора\n"
+        f"👨‍🍳 Шеф — кухня странных продуктов (нужен Ъ)",
+        _kb(rows),
     )
     await cb.answer()
 
@@ -116,11 +128,14 @@ async def work_illegal(cb: CallbackQuery):
 
     rows = [
         [InlineKeyboardButton(text="🦹 Залезть в карман", callback_data=with_owner("thief:steal", owner))],
-        # мошенник — только в личке (нужен ввод текста), без owner
+        # мошенник и впн — только в личке, без owner
         [InlineKeyboardButton(text="📞 Телефонный мошенник", callback_data="scammer:start")],
+        [InlineKeyboardButton(text="🌐 Продавец «VPN-а»", callback_data="vpn:start")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data=with_owner("menu:work", owner))],
     ]
-    await cb.message.edit_text("\n".join(lines), reply_markup=_kb(rows))
+    # нелегалка — фото трущоб; переход с фото работ = смена медиа, не пересылка
+    await show_photo_menu(cb.message, WORK_ILLEGAL_PHOTO, "work_illegal_photo_id",
+                          "\n".join(lines), _kb(rows))
     await cb.answer()
 
 
@@ -175,9 +190,11 @@ async def _choose_victim(cb: CallbackQuery, page: int = 0) -> None:
         ])
     rows.append([InlineKeyboardButton(text="⬅️ Назад",
                                       callback_data=with_owner("work:illegal", owner))])
-    await cb.message.edit_text(
+    # приходим с фото-экрана нелегалки — текст пересоздаст сообщение
+    await show_text_menu(
+        cb.message,
         "🦹 Кого щипаем? Сколько у кого в карманах — не видно, работаем вслепую:",
-        reply_markup=_kb(rows))
+        _kb(rows))
     await cb.answer()
 
 
@@ -219,7 +236,7 @@ async def _do_steal(cb: CallbackQuery, bot: Bot, target: tuple) -> None:
     # нищая цель — совесть взыграла
     if t_wealth <= MIN_TARGET_WEALTH:
         await storage.set_theft_cooldown(tg_id, 1)
-        await cb.message.edit_text(txt.POOR.format(target=t_nick), reply_markup=back)
+        await show_text_menu(cb.message, txt.POOR.format(target=t_nick), back)
         await cb.answer()
         return await announce(bot, txt.poor_chat(thief, t_nick))
 
@@ -229,7 +246,7 @@ async def _do_steal(cb: CallbackQuery, bot: Bot, target: tuple) -> None:
     # провал
     if is_fail(level, reduction):
         await storage.set_theft_cooldown(tg_id, 1)
-        await cb.message.edit_text("🦹 " + txt.fail(t_nick), reply_markup=back)
+        await show_text_menu(cb.message, "🦹 " + txt.fail(t_nick), back)
         await cb.answer()
         return await announce(bot, txt.fail_chat(thief, t_nick))
 
@@ -245,9 +262,10 @@ async def _do_steal(cb: CallbackQuery, bot: Bot, target: tuple) -> None:
         t_id, ROBBED_PROTECT_KEY,
         (datetime.now() + timedelta(hours=ROBBED_PROTECT_HOURS)).isoformat())
     await storage.set_theft_cooldown(tg_id, 12)
-    await cb.message.edit_text(
+    await show_text_menu(
+        cb.message,
         f"<b>{txt.QUALITY_NAMES[quality]}</b>\n\n{txt.success(quality, t_nick, amount)}",
-        reply_markup=back,
+        back,
     )
     await cb.answer()
     await announce(bot, txt.success_chat(quality, thief, t_nick)

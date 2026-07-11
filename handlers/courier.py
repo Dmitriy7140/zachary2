@@ -15,6 +15,7 @@ from game.taxman import grant
 from keyboards import back_menu
 from utils.guards import ensure_private, with_owner
 from utils.notify import announce
+from utils.photo import show_text_menu
 
 router = Router()
 _games: dict[int, dict] = {}
@@ -38,10 +39,12 @@ async def courier_menu(cb: CallbackQuery):
         [InlineKeyboardButton(text=bike_label, callback_data="courier:start:bike")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data=with_owner("menu:work", tg_id))],
     ]
-    await cb.message.edit_text(
+    # приходим с фото-экрана легалки — текст пересоздаст сообщение
+    await show_text_menu(
+        cb.message,
         "🛵 <b>Курьер</b>\nНавигатор сломан и вещает притчами — угадай направление 15 раз.\n"
         "Нужен телефон (Айфон рискует отвалиться).",
-        reply_markup=_kb(rows))
+        _kb(rows))
     await cb.answer()
 
 

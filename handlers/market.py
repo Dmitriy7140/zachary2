@@ -23,10 +23,20 @@ from utils.cleanup import delete_later
 from utils.guards import ensure_private, with_owner
 from utils.notify import announce
 from utils.pagination import nav_row, page_slice
+from utils.photo import show_photo_menu
 
 router = Router()
 
 BUY_PAGE_SIZE = 8
+
+# атмосфера базара: все экраны рынка — фото с подписью
+MARKET_PHOTO = "static/market.png"
+MARKET_PHOTO_META = "market_photo_id"
+
+
+async def _show(message: Message, text: str, rows=None) -> None:
+    await show_photo_menu(message, MARKET_PHOTO, MARKET_PHOTO_META, text,
+                          _kb(rows) if rows else None)
 
 
 class MarketStates(StatesGroup):
@@ -59,11 +69,12 @@ async def market_menu(cb: CallbackQuery):
         [InlineKeyboardButton(text="⬅️ В меню",
                               callback_data=with_owner("menu:main", cb.from_user.id))],
     ]
-    await cb.message.edit_text(
+    await _show(
+        cb.message,
         "🏪 <b>Рынок</b>\n"
         "Игроки сами привозят товары: продал — уехало на прилавок, "
         "покупаешь — из привезённого другими (наценка рынка 10%).",
-        reply_markup=_kb(rows))
+        rows)
     await cb.answer()
 
 
@@ -85,20 +96,21 @@ async def _render_sell(message, tg_id: int) -> None:
                          f"(продадутся через {secs // 3600}ч {secs % 3600 // 60}м)")
         lines.append("")
 
-    rows = []
     inv = await storage.get_inventory(tg_id)
     sellable = [it for it in sellable_items() if inv.get(it.key, 0) > 0]
+    buttons = []
     if sellable:
         lines.append("<b>Выставить на продажу:</b>")
+        # на рынке — только эмодзи, в два столбца
         for it in sellable:
-            rows.append([InlineKeyboardButton(
-                text=f"{it.emoji} {it.name} (×{inv[it.key]})",
-                callback_data=f"market:sell:{it.key}")])
+            buttons.append(InlineKeyboardButton(text=f"{it.emoji} ×{inv[it.key]}",
+                                                callback_data=f"market:sell:{it.key}"))
     else:
         lines.append("Продавать пока нечего — сходи на дойку 🐐")
 
+    rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
     rows.append([InlineKeyboardButton(text="⬅️ К рынку", callback_data="menu:market")])
-    await message.edit_text("\n".join(lines), reply_markup=_kb(rows))
+    await _show(message, "\n".join(lines), rows)
 
 
 @router.callback_query(F.data == "market:sellmenu")
@@ -142,10 +154,11 @@ async def market_sell(cb: CallbackQuery, state: FSMContext):
     rows.append([InlineKeyboardButton(text=all_label,
                                       callback_data=f"market:qty:{key}:{max_sell}")])
     rows.append([InlineKeyboardButton(text="⬅️ К продаже", callback_data="market:sellmenu")])
-    await cb.message.edit_text(
+    await _show(
+        cb.message,
         f"{it.emoji} <b>{it.name}</b> (у тебя ×{have}, свободно в продаже {free})\n"
         f"Сколько выставляем в лот?",
-        reply_markup=_kb(rows))
+        rows)
     await cb.answer()
 
 
@@ -172,13 +185,13 @@ async def _ask_price(cb: CallbackQuery, state: FSMContext, it, qty: int) -> None
                             chat_id=cb.message.chat.id, msg_id=cb.message.message_id)
     max_min = (it.sell_max - it.sell_min) * it.sell_minutes_per_z
     cnt = f" ×{qty}" if qty > 1 else ""
-    await cb.message.edit_text(
+    await _show(
+        cb.message,
         f"{it.emoji} <b>{it.name}</b>{cnt}\n"
         f"Цена ЗА ШТУКУ {it.sell_min}–{it.sell_max} Z: {it.sell_min} = моментально, "
         f"каждый +1 Z = +{it.sell_minutes_per_z} мин ожидания "
         f"(до ~{max_min // 60}ч при {it.sell_max} Z). Лот продаётся весь разом.\n"
-        "Напиши цену за штуку:"
-    )
+        "Напиши цену за штуку:")
     await cb.answer()
 
 
@@ -192,8 +205,8 @@ async def market_price(msg: Message, state: FSMContext, bot: Bot):
 
     async def finish(text: str):
         try:
-            await bot.edit_message_text(text, chat_id=data["chat_id"], message_id=data["msg_id"],
-                                        reply_markup=_back(tg_id))
+            await bot.edit_message_caption(chat_id=data["chat_id"], message_id=data["msg_id"],
+                                           caption=text, reply_markup=_back(tg_id))
         except Exception:
             await msg.answer(text, reply_markup=_back(tg_id))
 
@@ -242,12 +255,14 @@ async def _render_buy(message, tg_id: int) -> None:
     for item, _price, qty in stock:
         totals[item] = totals.get(item, 0) + qty
 
-    rows = []
+    # прилавки — только эмодзи, в два столбца
+    buttons = []
     for it in sellable_items():
         have = totals.get(it.key, 0)
-        tail = f" ({have} шт)" if have else " (пусто)"
-        rows.append([InlineKeyboardButton(text=f"{it.emoji} {it.name}{tail}",
-                                          callback_data=f"market:stall:{it.key}")])
+        tail = f" ×{have}" if have else " —"
+        buttons.append(InlineKeyboardButton(text=f"{it.emoji}{tail}",
+                                            callback_data=f"market:stall:{it.key}"))
+    rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
     rows.append([InlineKeyboardButton(text="⬅️ К рынку", callback_data="menu:market")])
     await message.edit_text(
         f"🛒 <b>Покупка</b>\n{market_vibe()}\n\nВыбери, к какому прилавку подойти:",
@@ -281,7 +296,7 @@ async def _render_stall(message, item: str, page: int = 0) -> None:
         if pages > 1:
             rows.append(nav_row(page, pages, f"marketbpg:{item}:"))
     rows.append([InlineKeyboardButton(text="⬅️ К прилавкам", callback_data="market:buymenu")])
-    await message.edit_text("\n".join(lines), reply_markup=_kb(rows))
+    await _show(message, "\n".join(lines), rows)
 
 
 @router.callback_query(F.data.startswith("market:stall:"))
@@ -335,7 +350,8 @@ async def market_buy(cb: CallbackQuery, state: FSMContext):
     await state.set_state(MarketStates.buying)
     await state.update_data(item=item, price=price,
                             chat_id=cb.message.chat.id, msg_id=cb.message.message_id)
-    await cb.message.edit_text(
+    await _show(
+        cb.message,
         f"🛒 {it.emoji} <b>{it.name}</b> по <b>{price} Z</b> (на прилавке {in_stock} шт)\n"
         f"Твой лимит: <b>{limit}</b> (склад {space}, денег на {available // price}).\n"
         "Сколько берём? Напиши число:")
@@ -353,8 +369,8 @@ async def market_buy_input(msg: Message, state: FSMContext, bot: Bot):
 
     async def finish(text: str):
         try:
-            await bot.edit_message_text(text, chat_id=data["chat_id"], message_id=data["msg_id"],
-                                        reply_markup=_back(tg_id))
+            await bot.edit_message_caption(chat_id=data["chat_id"], message_id=data["msg_id"],
+                                           caption=text, reply_markup=_back(tg_id))
         except Exception:
             await msg.answer(text, reply_markup=_back(tg_id))
 

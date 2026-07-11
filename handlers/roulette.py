@@ -123,4 +123,15 @@ async def roulette_bet(msg: Message, state: FSMContext, bot: Bot):
         await announce(bot, casino.loss_msg(mention, bet))
 
     new_balance = (await storage.get_profile(tg_id))[3]
-    await finish(f"🎰 {line}\n\nБаланс: <b>{new_balance} Z</b>")
+    # после спина — кнопка «ЕЩЁ!!!»: заново запускает выбор цвета (проверка
+    # баланса — в roulette_start)
+    again_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎰 ЕЩЁ!!!", callback_data="roulette:start")],
+        [InlineKeyboardButton(text="⬅️ В меню", callback_data=with_owner("menu:main", tg_id))],
+    ])
+    try:
+        await bot.edit_message_text(f"🎰 {line}\n\nБаланс: <b>{new_balance} Z</b>",
+                                    chat_id=data["chat_id"], message_id=data["msg_id"],
+                                    reply_markup=again_kb)
+    except Exception:
+        await msg.answer(f"🎰 {line}\n\nБаланс: <b>{new_balance} Z</b>", reply_markup=again_kb)

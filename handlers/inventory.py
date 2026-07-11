@@ -55,16 +55,19 @@ async def inventory(cb: CallbackQuery):
         return await cb.answer("Сначала зарегистрируйся 😉", show_alert=True)
 
     items = await storage.get_inventory(tg_id)
-    rows = []
+    buttons = []
     for key, qty in items.items():
         it = ITEMS.get(key)
         if not it or qty <= 0:
             continue
         label = f"{it.emoji} {it.name}" + (f" ×{qty}" if it.max_qty > 1 else "")
-        rows.append([InlineKeyboardButton(text=label, callback_data=with_owner(f"invitem:{key}", tg_id))])
+        buttons.append(InlineKeyboardButton(text=label,
+                                            callback_data=with_owner(f"invitem:{key}", tg_id)))
+    # два столбца
+    rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
     rows.append([InlineKeyboardButton(text="⬅️ В меню", callback_data=with_owner("menu:main", tg_id))])
 
-    text = "🎒 <b>Инвентарь</b>\nВыбери предмет:" if len(rows) > 1 else "🎒 <b>Инвентарь</b>\n\nпусто 🕸"
+    text = "🎒 <b>Инвентарь</b>\nВыбери предмет:" if buttons else "🎒 <b>Инвентарь</b>\n\nпусто 🕸"
     await cb.message.edit_text(text, reply_markup=_kb(rows))
     await cb.answer()
 

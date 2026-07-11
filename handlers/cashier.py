@@ -54,10 +54,17 @@ async def cashier_start(cb: CallbackQuery):
     await storage.set_cooldown(tg_id, "cashier")
 
     games = await storage.player_stat(tg_id, "cashier_games")
+    # игровое поле — всегда свежее текстовое сообщение: на старое могли прийти
+    # с фото-экрана легалки, а раунды редактируют именно текст
+    try:
+        await cb.message.delete()
+    except Exception:
+        pass
+    board = await cb.message.answer("🛒 Смена начинается…")
     _games[tg_id] = {
         "round": 0, "score": 0, "picks": 0, "level": level(games), "active": None, "kind": None,
         "good": None, "timeout": None, "name": cb.from_user.full_name,
-        "chat_id": cb.message.chat.id, "msg_id": cb.message.message_id,
+        "chat_id": board.chat.id, "msg_id": board.message_id,
     }
     await cb.answer()
     await _next_round(cb.bot, tg_id)

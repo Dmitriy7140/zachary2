@@ -38,6 +38,9 @@ async def allstats(msg: Message):
         f"📞 Больше всех наварил телефоном: <b>{_top(await storage.stat_top('scam_won'), ' Z')}</b>",
         f"🛵 Больше всех наездил курьером: <b>{_top(await storage.stat_top('courier_won'), ' Z')}</b>",
         f"🛒 Больше всего пикнул товаров: <b>{_top(await storage.stat_top('cashier_picks'), ' шт')}</b>",
+        f"👨‍🍳 Лучший шеф (нашефил): <b>{_top(await storage.stat_top('chef_won'), ' Z')}</b>",
+        f"🌐 Главный барыга VPN: <b>{_top(await storage.stat_top('vpn_won'), ' Z')}</b> "
+        f"(чаще всех попадался: {_top(await storage.stat_top('vpn_busted'), ' раз')})",
         f"🤝 Сыграно ставок: <b>{bets_total}</b> "
         f"(больше всех выиграл: {_top(await storage.stat_top('bets_won'))})",
         f"🤲 Чаще всего брал в долг: <b>{_top(await storage.stat_top('borrowed'), ' раз')}</b>",
@@ -78,6 +81,9 @@ async def mystats(msg: Message):
         f"🥊 «Бей Вовку»: заработано <b>{await st('vovka_won')} Z</b> · 😡 месть словил <b>{await st('vovka_revenge')}</b> раз",
         f"🛒 Кассир: смен <b>{await st('cashier_games')}</b>, пикнуто <b>{await st('cashier_picks')}</b> шт, "
         f"заработано <b>{await st('cashier_won')} Z</b>",
+        f"👨‍🍳 Шеф: смен <b>{await st('chef_games')}</b>, нашефлено <b>{await st('chef_won')} Z</b>",
+        f"🌐 VPN: наторговал <b>{await st('vpn_won')} Z</b> · попадался лысому "
+        f"<b>{await st('vpn_busted')}</b> раз",
         f"🎣 Рыбы поймано: <b>{await st('fish_caught')}</b> · 🍑 айфон в жопу: <b>{await st('iphone_butt')}</b> раз",
         f"🥛 Продано молока: <b>{await st('sold_milk_can')}</b> шт",
         f"🐐 Доил козу: <b>{await st('goat_milked')}</b> раз",

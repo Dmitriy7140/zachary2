@@ -7,7 +7,7 @@ from aiogram.utils.markdown import hlink
 
 from content.fishing import no_rod, no_rod_chat
 from db import storage
-from game.fishing import BAIT_ITEMS, CAST_MINUTES, fishing_level
+from game.fishing import BAIT_ITEMS, CAST_MINUTES, FISH_ITEMS, fishing_level
 from game.items import ITEMS
 from keyboards import back_menu
 from utils.guards import ensure_private, with_owner
@@ -66,23 +66,76 @@ async def fishing_start(cb: CallbackQuery, bot: Bot):
     await cb.answer()
 
 
+async def _try_cast(tg_id: int, tier: int) -> str | None:
+    """Закинуть удочку с наживкой tier. Вернуть текст ошибки или None (успех)."""
+    if await storage.get_item_qty(tg_id, "rod") < 1:
+        return "Нет удочки"
+    if await storage.active_cast(tg_id):
+        return "Удочка уже закинута"
+    if not await storage.remove_item(tg_id, BAIT_ITEMS[tier], 1):
+        return "Нет такой наживки"
+    catch_at = (datetime.now() + timedelta(minutes=CAST_MINUTES)).isoformat()
+    await storage.cast_rod(tg_id, tier, catch_at)
+    return None
+
+
 @router.callback_query(F.data.startswith("fish:cast:"))
 async def fish_cast(cb: CallbackQuery):
     if not await ensure_private(cb):
         return
     tg_id = cb.from_user.id
     tier = int(cb.data.split(":")[2])
-    if await storage.get_item_qty(tg_id, "rod") < 1:
-        return await cb.answer("Нет удочки", show_alert=True)
-    if await storage.active_cast(tg_id):
-        return await cb.answer("Удочка уже закинута", show_alert=True)
-    if not await storage.remove_item(tg_id, BAIT_ITEMS[tier], 1):
-        return await cb.answer("Нет такой наживки", show_alert=True)
-
-    catch_at = (datetime.now() + timedelta(minutes=CAST_MINUTES)).isoformat()
-    await storage.cast_rod(tg_id, tier, catch_at)
+    err = await _try_cast(tg_id, tier)
+    if err:
+        return await cb.answer(err, show_alert=True)
     await _msg(cb, f"🎣 Закинул удочку с наживкой {ITEMS[BAIT_ITEMS[tier]].emoji}!\n"
                    f"Улов будет через {CAST_MINUTES} минут.", tg_id)
+
+
+# ---------- «Закинуть снова» под сообщением об улове ----------
+
+@router.callback_query(F.data.startswith("fish:again:"))
+async def fish_again(cb: CallbackQuery):
+    tg_id = cb.from_user.id
+    if not await storage.get_profile(tg_id):
+        return await cb.answer("Сначала зарегистрируйся 😉", show_alert=True)
+    tier = int(cb.data.split(":")[2])
+
+    # наживка на ту же рыбу есть — кидаем её же
+    if await storage.get_item_qty(tg_id, BAIT_ITEMS[tier]) > 0:
+        err = await _try_cast(tg_id, tier)
+        if err:
+            return await cb.answer(err, show_alert=True)
+        try:
+            await cb.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        await cb.message.answer(
+            f"🎣 Закинул снова с наживкой {ITEMS[BAIT_ITEMS[tier]].emoji}!\n"
+            f"Улов будет через {CAST_MINUTES} минут.")
+        return await cb.answer()
+
+    # той же нет — предлагаем замену из имеющихся
+    avail = [t for t in (1, 2, 3)
+             if t != tier and await storage.get_item_qty(tg_id, BAIT_ITEMS[t]) > 0]
+    if not avail:
+        try:
+            await cb.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        return await cb.answer("🪱 Наживка кончилась — загляни в магазин", show_alert=True)
+
+    rows = [[InlineKeyboardButton(
+        text=f"Закинуть с {ITEMS[BAIT_ITEMS[t]].emoji} (на {ITEMS[FISH_ITEMS[t]].emoji})",
+        callback_data=f"fish:again:{t}")]
+        for t in avail]
+    try:
+        await cb.message.edit_reply_markup(
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    except Exception:
+        pass
+    await cb.answer(f"Наживки {ITEMS[BAIT_ITEMS[tier]].emoji} больше нет — есть замена 👇",
+                    show_alert=True)
 
 
 async def _msg(cb: CallbackQuery, text: str, tg_id: int):

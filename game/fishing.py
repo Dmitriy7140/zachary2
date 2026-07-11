@@ -5,6 +5,7 @@ import random
 from datetime import datetime
 
 from aiogram import Bot
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from db import storage
 from game.items import ITEMS
@@ -12,7 +13,7 @@ from game.items import ITEMS
 log = logging.getLogger(__name__)
 
 CAST_MINUTES = 10
-MILK_CHANCE = 0.05
+ITEM_CHANCE = 0.05  # шанс вместо рыбы выловить случайный ДРУГОЙ предмет (любой)
 
 # рыб для уровня
 LEVEL_THRESHOLDS = {2: 50, 3: 100}
@@ -44,9 +45,13 @@ def fish_to_next_level(fish_caught: int) -> int | None:
 
 
 def roll_catch(level: int, bait_tier: int) -> str | None:
-    """Вернуть ключ пойманного предмета ('milk_can' / 'fish_N') или None (пусто)."""
-    if random.random() < MILK_CHANCE:
-        return "milk_can"
+    """Вернуть ключ пойманного ('fish_N' или любой другой предмет) или None (пусто).
+
+    5% — из пруда вытаскивается случайный НЕ-рыбный предмет реестра:
+    от бидона молока до тачки (кто-то утопил, бывает).
+    """
+    if random.random() < ITEM_CHANCE:
+        return random.choice([k for k in ITEMS if not k.startswith("fish_")])
     chance = CHANCE.get(level, {}).get(bait_tier, 0)
     if random.random() < chance:
         return FISH_ITEMS[bait_tier]
@@ -76,12 +81,23 @@ async def _process_due(bot: Bot) -> None:
             text = "🎣 Сорвалось! Улов пуст."
         else:
             it = ITEMS[catch]
-            await storage.add_item(tg_id, catch, 1, it.max_qty)
-            if catch.startswith("fish_"):
-                await storage.bump(tg_id, "fish_caught")
-            text = f"🎣 Есть улов! Поймал {it.emoji} <b>{it.name}</b>."
+            if await storage.get_item_qty(tg_id, catch) >= it.max_qty:
+                text = (f"🎣 Выловил {it.emoji} <b>{it.name}</b>… но такой у тебя "
+                        f"уже есть — выбросил обратно в пруд.")
+            else:
+                await storage.add_item(tg_id, catch, 1, it.max_qty)
+                if catch.startswith("fish_"):
+                    await storage.bump(tg_id, "fish_caught")
+                    text = f"🎣 Есть улов! Поймал {it.emoji} <b>{it.name}</b>."
+                else:
+                    text = (f"🎣 Охренеть! Вместо рыбы из пруда вытащил "
+                            f"{it.emoji} <b>{it.name}</b>! Кто-то утопил, видимо.")
 
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="🎣 Закинуть снова",
+                                 callback_data=f"fish:again:{bait_tier}")
+        ]])
         try:
-            await bot.send_message(tg_id, text)
+            await bot.send_message(tg_id, text, reply_markup=kb)
         except Exception:
             pass
