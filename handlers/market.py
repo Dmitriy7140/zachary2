@@ -264,9 +264,9 @@ async def _render_buy(message, tg_id: int) -> None:
                                             callback_data=f"market:stall:{it.key}"))
     rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
     rows.append([InlineKeyboardButton(text="⬅️ К рынку", callback_data="menu:market")])
-    await message.edit_text(
-        f"🛒 <b>Покупка</b>\n{market_vibe()}\n\nВыбери, к какому прилавку подойти:",
-        reply_markup=_kb(rows))
+    await _show(message,
+                f"🛒 <b>Покупка</b>\n{market_vibe()}\n\nВыбери, к какому прилавку подойти:",
+                rows)
 
 
 @router.callback_query(F.data == "market:buymenu")
