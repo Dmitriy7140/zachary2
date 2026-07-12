@@ -19,6 +19,11 @@ from game.items import ITEMS
 from keyboards import back_menu
 from utils.guards import ensure_owner, with_owner
 from utils.notify import announce
+from utils.photo import show_photo_menu, show_text_menu
+
+# то же фото, что в главном меню: переход туда-обратно меняет только подпись
+MAIN_PHOTO = "static/main.png"
+MAIN_PHOTO_META = "main_photo_id"
 
 router = Router()
 
@@ -68,7 +73,7 @@ async def inventory(cb: CallbackQuery):
     rows.append([InlineKeyboardButton(text="⬅️ В меню", callback_data=with_owner("menu:main", tg_id))])
 
     text = "🎒 <b>Инвентарь</b>\nВыбери предмет:" if buttons else "🎒 <b>Инвентарь</b>\n\nпусто 🕸"
-    await cb.message.edit_text(text, reply_markup=_kb(rows))
+    await show_photo_menu(cb.message, MAIN_PHOTO, MAIN_PHOTO_META, text, _kb(rows))
     await cb.answer()
 
 
@@ -91,7 +96,8 @@ async def item_menu(cb: CallbackQuery):
             for act, label in actions]
     rows.append([InlineKeyboardButton(text="⬅️ К инвентарю", callback_data=with_owner("menu:inventory", tg_id))])
     tail = "\nЧто делаем?" if actions else "\nС этим предметом ничего не сделать."
-    await cb.message.edit_text(f"{it.emoji} <b>{it.name}</b>{tail}", reply_markup=_kb(rows))
+    await show_photo_menu(cb.message, MAIN_PHOTO, MAIN_PHOTO_META,
+                          f"{it.emoji} <b>{it.name}</b>{tail}", _kb(rows))
     await cb.answer()
 
 
@@ -113,10 +119,11 @@ async def item_action(cb: CallbackQuery, bot: Bot):
         await _samsung_write(cb, tg_id)
     elif key == "samsung" and action == "selfemploy":
         if await do_self_employ(cb, bot):
-            await cb.message.edit_text(
+            await show_text_menu(
+                cb.message,
                 "📱 Самозанятость оформлена через Госуслуги на Самсунге. "
                 "ФНС уже потирает руки: −200 Z/день.",
-                reply_markup=back_menu(tg_id))
+                back_menu(tg_id))
     elif key == "bike" and action == "ride":
         await _bike_ride(cb, bot, tg_id)
     elif key == "milk_can" and action == "shake":
@@ -166,9 +173,10 @@ async def _iphone_trash(cb: CallbackQuery, bot: Bot, tg_id: int) -> None:
     if not await storage.remove_item(tg_id, "iphone", 1):
         return await cb.answer("Айфона уже нет", show_alert=True)
     await announce(bot, iphone_trash(_mention(cb)))
-    await cb.message.edit_text(
+    await show_text_menu(
+        cb.message,
         "🗑 Айфон отправился в мусорку. Жопа снова в строю — пятая тысяча влезет.",
-        reply_markup=back_menu(tg_id),
+        back_menu(tg_id),
     )
     await cb.answer()
 
@@ -192,7 +200,7 @@ async def _samsung_write(cb: CallbackQuery, tg_id: int) -> None:
     rows = [[InlineKeyboardButton(text=f"📲 {nick}", callback_data=f"sms:to:{pid}")]
             for pid, nick in owners]
     rows.append([InlineKeyboardButton(text="⬅️ К инвентарю", callback_data=with_owner("menu:inventory", tg_id))])
-    await cb.message.edit_text("📲 <b>Самсунг</b>\nКому написать?", reply_markup=_kb(rows))
+    await show_text_menu(cb.message, "📲 <b>Самсунг</b>\nКому написать?", _kb(rows))
     await cb.answer()
 
 

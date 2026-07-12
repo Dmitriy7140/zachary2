@@ -19,6 +19,7 @@ from keyboards import back_menu
 from utils.cleanup import delete_later
 from utils.guards import ensure_private, with_owner
 from utils.notify import announce
+from utils.photo import show_screen
 
 router = Router()
 
@@ -47,12 +48,13 @@ async def roulette_start(cb: CallbackQuery):
         [InlineKeyboardButton(text="🟢 Зелёное (10%, ×10)", callback_data="roul:color:green")],
         [InlineKeyboardButton(text="⬅️ В меню", callback_data=with_owner("menu:main", cb.from_user.id))],
     ])
-    await cb.message.edit_text(
+    await show_screen(
+        cb.message,
         "🎰 <b>Рулетка</b>\n"
         "🟢 зелёное 10% → ×10 · 🔴 красное 45% → ×1.5 · ⚫ чёрное 45% → ×1.5\n"
         "Угадал цвет — забираешь выигрыш, нет — ставка сгорает.\n\n"
         "На какой цвет ставишь?",
-        reply_markup=kb,
+        kb,
     )
     await cb.answer()
 
@@ -73,7 +75,8 @@ async def roulette_color(cb: CallbackQuery, state: FSMContext):
     await state.set_state(RouletteStates.betting)
     await state.update_data(color=color, max_bet=max_bet,
                             chat_id=cb.message.chat.id, msg_id=cb.message.message_id)
-    await cb.message.edit_text(
+    await show_screen(
+        cb.message,
         f"🎰 Ставка на {emoji} <b>{name}</b>\n"
         f"Баланс: <b>{profile[3]} Z</b>\n"
         f"Сколько ставишь? Можно всё — до <b>{max_bet} Z</b>.\n"
@@ -89,12 +92,18 @@ async def roulette_bet(msg: Message, state: FSMContext, bot: Bot):
     tg_id = msg.from_user.id
     delete_later(bot, msg.chat.id, msg.message_id)
 
-    async def finish(text: str):
+    async def finish(text: str, kb=None):
+        kb = kb or back_menu(tg_id)
+        # сообщение рулетки может быть и текстом, и фото площади
         try:
             await bot.edit_message_text(text, chat_id=data["chat_id"], message_id=data["msg_id"],
-                                        reply_markup=back_menu(tg_id))
+                                        reply_markup=kb)
         except Exception:
-            await msg.answer(text, reply_markup=back_menu(tg_id))
+            try:
+                await bot.edit_message_caption(chat_id=data["chat_id"], message_id=data["msg_id"],
+                                               caption=text, reply_markup=kb)
+            except Exception:
+                await msg.answer(text, reply_markup=kb)
 
     raw = (msg.text or "").strip()
     if not raw.isdigit():
@@ -129,9 +138,4 @@ async def roulette_bet(msg: Message, state: FSMContext, bot: Bot):
         [InlineKeyboardButton(text="🎰 ЕЩЁ!!!", callback_data="roulette:start")],
         [InlineKeyboardButton(text="⬅️ В меню", callback_data=with_owner("menu:main", tg_id))],
     ])
-    try:
-        await bot.edit_message_text(f"🎰 {line}\n\nБаланс: <b>{new_balance} Z</b>",
-                                    chat_id=data["chat_id"], message_id=data["msg_id"],
-                                    reply_markup=again_kb)
-    except Exception:
-        await msg.answer(f"🎰 {line}\n\nБаланс: <b>{new_balance} Z</b>", reply_markup=again_kb)
+    await finish(f"🎰 {line}\n\nБаланс: <b>{new_balance} Z</b>", again_kb)

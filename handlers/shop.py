@@ -10,6 +10,7 @@ from game.fishing import BAIT_TIER, fishing_level
 from game.items import ITEMS, shop_items
 from utils.guards import ensure_owner, with_owner
 from utils.notify import announce
+from utils.photo import show_text_menu
 
 router = Router()
 
@@ -39,9 +40,10 @@ async def _render(message, owner: int) -> None:
             rows.append([InlineKeyboardButton(text=f"{it.emoji} {it.name} — {it.price} Z",
                                               callback_data=with_owner(f"shop:buy:{it.key}", owner))])
     rows.append([InlineKeyboardButton(text="⬅️ В меню", callback_data=with_owner("menu:main", owner))])
-    await message.edit_text(
+    await show_text_menu(
+        message,
         f"🛒 <b>Магазин</b>\nБаланс: <b>{profile[3]} Z</b>",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+        InlineKeyboardMarkup(inline_keyboard=rows),
     )
 
 

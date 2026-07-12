@@ -8,6 +8,7 @@ from db import storage
 from game.items import ITEMS, blackmarket_items
 from utils.guards import ensure_owner, with_owner
 from utils.notify import announce
+from utils.photo import show_text_menu
 
 router = Router()
 
@@ -36,7 +37,7 @@ async def _render(message, owner: int) -> None:
             rows.append([InlineKeyboardButton(text=f"{it.emoji} {it.name} — {it.price} Z",
                                               callback_data=with_owner(f"farca:buy:{it.key}", owner))])
     rows.append([InlineKeyboardButton(text="⬅️ В меню", callback_data=with_owner("menu:main", owner))])
-    await message.edit_text("\n".join(lines), reply_markup=_kb(rows))
+    await show_text_menu(message, "\n".join(lines), _kb(rows))
 
 
 @router.callback_query(F.data.startswith("menu:farca:"))

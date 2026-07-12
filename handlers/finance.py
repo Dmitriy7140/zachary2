@@ -4,6 +4,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 
 from db import storage
 from utils.guards import ensure_private, with_owner
+from utils.photo import show_text_menu
 
 router = Router()
 
@@ -21,8 +22,9 @@ async def finance_menu(cb: CallbackQuery):
         [InlineKeyboardButton(text="🤝 Ставки", callback_data="menu:bets")],
         [InlineKeyboardButton(text="⬅️ В меню", callback_data=with_owner("menu:main", owner))],
     ]
-    await cb.message.edit_text(
+    await show_text_menu(
+        cb.message,
         "💳 <b>Финансы</b>\nЗаймы, азарт и тёмные делишки — всё, что делает бедных беднее:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+        InlineKeyboardMarkup(inline_keyboard=rows),
     )
     await cb.answer()

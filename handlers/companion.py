@@ -14,6 +14,10 @@ from keyboards import main_menu
 from mc.rcon import online_players
 from utils.cleanup import delete_later
 from utils.guards import ensure_owner
+from utils.photo import send_photo_menu, show_photo_menu
+
+MAIN_PHOTO = "static/main.png"
+MAIN_PHOTO_META = "main_photo_id"
 
 router = Router()
 
@@ -81,7 +85,9 @@ async def start(msg: Message):
             "и зарегистрируйся через приветствие в канале 😉"
         )
         return
-    await msg.answer(await _profile_card(profile), reply_markup=main_menu(msg.from_user.id))
+    await send_photo_menu(msg, MAIN_PHOTO, MAIN_PHOTO_META,
+                          await _profile_card(profile),
+                          main_menu(msg.from_user.id))
 
 
 @router.callback_query(F.data.startswith("menu:main:"))
@@ -91,14 +97,7 @@ async def cb_main(cb: CallbackQuery):
     profile = await storage.get_profile(cb.from_user.id)
     if not profile:
         return await cb.answer("Сначала зарегистрируйся 😉", show_alert=True)
-    card = await _profile_card(profile)
-    try:
-        await cb.message.edit_text(card, reply_markup=main_menu(cb.from_user.id))
-    except Exception:
-        # пришли с фото-экрана (рынок): текст не отредактировать — пересоздаём
-        try:
-            await cb.message.delete()
-        except Exception:
-            pass
-        await cb.message.answer(card, reply_markup=main_menu(cb.from_user.id))
+    await show_photo_menu(cb.message, MAIN_PHOTO, MAIN_PHOTO_META,
+                          await _profile_card(profile),
+                          main_menu(cb.from_user.id))
     await cb.answer()

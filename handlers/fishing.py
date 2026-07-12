@@ -12,6 +12,7 @@ from game.items import ITEMS
 from keyboards import back_menu
 from utils.guards import ensure_private, with_owner
 from utils.notify import announce
+from utils.photo import show_screen
 
 router = Router()
 
@@ -30,7 +31,7 @@ async def fishing_start(cb: CallbackQuery, bot: Bot):
 
     # без удочки — смех Жмыжко и Славянина
     if await storage.get_item_qty(tg_id, "rod") < 1:
-        await cb.message.edit_text(no_rod(), reply_markup=back_menu(tg_id))
+        await show_screen(cb.message, no_rod(), back_menu(tg_id))
         await cb.answer()
         mention = hlink(cb.from_user.full_name, f"tg://user?id={tg_id}")
         return await announce(bot, no_rod_chat(mention))
@@ -40,10 +41,11 @@ async def fishing_start(cb: CallbackQuery, bot: Bot):
     if active:
         bait_tier, catch_at = active
         left = max(0, int((datetime.fromisoformat(catch_at) - datetime.now()).total_seconds()))
-        await cb.message.edit_text(
+        await show_screen(
+            cb.message,
             f"🎣 Удочка закинута (наживка {ITEMS[BAIT_ITEMS[bait_tier]].emoji}).\n"
             f"Улов через {left // 60}м {left % 60}с — придёт уведомление.",
-            reply_markup=back_menu(tg_id))
+            back_menu(tg_id))
         return await cb.answer()
 
     # выбор наживки
@@ -60,9 +62,10 @@ async def fishing_start(cb: CallbackQuery, bot: Bot):
         return await _msg(cb, "🎣 Нет наживки! Купи приманку в магазине.", tg_id)
 
     rows.append([InlineKeyboardButton(text="⬅️ В меню", callback_data=with_owner("menu:main", tg_id))])
-    await cb.message.edit_text(
+    await show_screen(
+        cb.message,
         f"🎣 <b>Рыбалка</b> · уровень {lvl} (поймано рыб: {fc})\nВыбери наживку и закинь удочку:",
-        reply_markup=_kb(rows))
+        _kb(rows))
     await cb.answer()
 
 
@@ -139,5 +142,5 @@ async def fish_again(cb: CallbackQuery):
 
 
 async def _msg(cb: CallbackQuery, text: str, tg_id: int):
-    await cb.message.edit_text(text, reply_markup=back_menu(tg_id))
+    await show_screen(cb.message, text, back_menu(tg_id))
     await cb.answer()

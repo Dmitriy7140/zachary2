@@ -13,6 +13,11 @@ from game.taxman import grant
 from keyboards import back_menu
 from utils.guards import ensure_owner, with_owner
 from utils.notify import announce
+from utils.photo import show_photo_menu, show_screen
+
+# площадь с казино и аркадой — фон всех экранов мини-игр
+GAMES_PHOTO = "static/games.png"
+GAMES_PHOTO_META = "games_photo_id"
 
 router = Router()
 
@@ -39,7 +44,8 @@ async def games_menu(cb: CallbackQuery):
         [InlineKeyboardButton(text="🎣 Рыбалка", callback_data="fishing:start")],
         [InlineKeyboardButton(text="⬅️ В меню", callback_data=with_owner("menu:main", owner))],
     ]
-    await cb.message.edit_text("🎲 <b>Мини-игры</b>\nВыбери забаву:", reply_markup=_kb(rows))
+    await show_photo_menu(cb.message, GAMES_PHOTO, GAMES_PHOTO_META,
+                          "🎲 <b>Мини-игры</b>\nВыбери забаву:", _kb(rows))
     await cb.answer()
 
 
@@ -65,9 +71,8 @@ async def goat_start(cb: CallbackQuery):
         InlineKeyboardButton(text="👈 Левая", callback_data=with_owner("goat:r1:left", owner)),
         InlineKeyboardButton(text="Правая 👉", callback_data=with_owner("goat:r1:right", owner)),
     ]]
-    await cb.message.edit_text(
-        "🐐 Перед вами коза. С какой титьки начнём?", reply_markup=_kb(rows)
-    )
+    # коза играется прямо на площади (подпись фото)
+    await show_screen(cb.message, "🐐 Перед вами коза. С какой титьки начнём?", _kb(rows))
     await cb.answer()
 
 
@@ -80,14 +85,14 @@ async def goat_round1(cb: CallbackQuery):
     await grant(cb.bot, tg_id, 10)
 
     if random.random() < 0.5:  # неверная титька — игра заканчивается
-        await cb.message.edit_text(f"{goat.pasha()}\n\n💰 +10 Z", reply_markup=back_menu(owner))
+        await show_screen(cb.message, f"{goat.pasha()}\n\n💰 +10 Z", back_menu(owner))
         return await cb.answer()
 
     # верная титька — раунд 2
     rows = [[InlineKeyboardButton(text=goat.OPTION_LABELS[o],
                                   callback_data=with_owner(f"goat:r2:{o}", owner))]
             for o in ("1", "2", "3")]
-    await cb.message.edit_text(f"💰 +10 Z\n\n{goat.ROUND2_INTRO}", reply_markup=_kb(rows))
+    await show_screen(cb.message, f"💰 +10 Z\n\n{goat.ROUND2_INTRO}", _kb(rows))
     await cb.answer()
 
 
@@ -102,15 +107,16 @@ async def goat_round2(cb: CallbackQuery):
     if random.random() >= goat.SUCCESS_CHANCE.get(opt, 0):
         # провал — игра заканчивается, третьего раунда нет
         await grant(cb.bot, tg_id, 5)
-        await cb.message.edit_text(f"{goat.FAIL[opt]}\n\n💰 +5 Z", reply_markup=back_menu(owner))
+        await show_screen(cb.message, f"{goat.FAIL[opt]}\n\n💰 +5 Z", back_menu(owner))
         return await cb.answer()
 
     # успех — +25 и только теперь раунд 3
     await grant(cb.bot, tg_id, 25)
     await storage.bump(tg_id, "goat_milked")
     round3 = await _round3(cb.bot, tg_id)
-    await cb.message.edit_text(
-        f"{goat.success(opt)}\n\n💰 +25 Z\n\n———\n{round3}", reply_markup=back_menu(owner)
+    await show_screen(
+        cb.message,
+        f"{goat.success(opt)}\n\n💰 +25 Z\n\n———\n{round3}", back_menu(owner)
     )
     await cb.answer()
     mention = hlink(cb.from_user.full_name, f"tg://user?id={tg_id}")

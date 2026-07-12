@@ -74,13 +74,55 @@ async def show_photo_menu(message: Message, path: str, meta_key: str,
         await message.answer(caption, reply_markup=kb)
 
 
-async def show_text_menu(message: Message, text: str, kb=None) -> None:
-    """Текстовое меню, умеющее приходить С фото-экрана (пересоздаёт сообщение)."""
+async def send_photo_menu(message: Message, path: str, meta_key: str,
+                          caption: str, kb=None) -> None:
+    """Отправить НОВОЕ сообщение-фото (для /start), с тем же кэшем file_id."""
+    fid = await storage.get_meta(meta_key)
+    if fid:
+        try:
+            await message.answer_photo(fid, caption=caption, reply_markup=kb)
+            return
+        except Exception:
+            pass
+    try:
+        sent = await message.answer_photo(FSInputFile(path), caption=caption,
+                                          reply_markup=kb)
+        await _remember(meta_key, sent.photo)
+    except Exception:
+        await message.answer(caption, reply_markup=kb)
+
+
+async def show_screen(message: Message, text: str, kb=None) -> None:
+    """Экран поверх текущего сообщения, НЕ меняя его тип: фото → правим
+    подпись, текст → правим текст. Для игровых экранов внутри фото-меню."""
+    try:
+        if message.photo:
+            await message.edit_caption(caption=text, reply_markup=kb)
+        else:
+            await message.edit_text(text, reply_markup=kb)
+        return
+    except Exception as e:
+        if "not modified" in str(e):
+            return
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    await message.answer(text, reply_markup=kb)
+
+
+async def show_text_menu(message: Message, text: str, kb=None) -> Message:
+    """Текстовое меню, умеющее приходить С фото-экрана (пересоздаёт сообщение).
+
+    Возвращает актуальное сообщение — после пересоздания msg_id меняется,
+    FSM-флоу должны запоминать именно его.
+    """
     try:
         await message.edit_text(text, reply_markup=kb)
+        return message
     except Exception:
         try:
             await message.delete()
         except Exception:
             pass
-        await message.answer(text, reply_markup=kb)
+        return await message.answer(text, reply_markup=kb)

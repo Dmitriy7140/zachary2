@@ -15,6 +15,7 @@ from mc.rcon import online_players, rcon
 from utils.cleanup import delete_later
 from utils.guards import ensure_private, with_owner
 from utils.pagination import nav_row, page_slice
+from utils.photo import show_text_menu
 
 log = logging.getLogger(__name__)
 router = Router()
@@ -43,7 +44,7 @@ async def _render_menu(message, owner: int, page: int = 0) -> None:
     if pages > 1:
         rows.append(nav_row(page, pages, "pranks:page:"))
     rows.append([InlineKeyboardButton(text="⬅️ В меню", callback_data=with_owner("menu:main", owner))])
-    await message.edit_text("😈 <b>Пакости</b>\nВыбери, что устроить:", reply_markup=_kb(rows))
+    await show_text_menu(message, "😈 <b>Пакости</b>\nВыбери, что устроить:", _kb(rows))
 
 
 @router.callback_query(F.data == "menu:pranks")

@@ -26,6 +26,11 @@ NO_CAR_WHINE = ("🚗 Так, стоп, а чё я как лох без тачк
 from utils.cleanup import delete_later
 from utils.guards import ensure_private, with_owner
 from utils.notify import announce
+from utils.photo import show_photo_menu, show_text_menu
+
+# пустырь — пока бизнесов нет; бытовка «ОФИС» — когда бизнес появился
+BIZ_EMPTY_PHOTO = "static/business_empty.png"
+BIZ_OFFICE_PHOTO = "static/business_office.png"
 
 router = Router()
 
@@ -66,7 +71,9 @@ async def _render(message, tg_id: int) -> None:
                                       callback_data="biz:card")],
                 [InlineKeyboardButton(text="⬅️ В меню",
                                       callback_data=with_owner("menu:main", tg_id))]]
-        await message.edit_text("\n".join(lines), reply_markup=_kb(rows))
+        # бизнеса нет — грязный пустырь как мотивация
+        await show_photo_menu(message, BIZ_EMPTY_PHOTO, "biz_empty_photo_id",
+                              "\n".join(lines), _kb(rows))
         return
 
     tier, level, custom_name, paused = biz
@@ -104,7 +111,9 @@ async def _render(message, tg_id: int) -> None:
          InlineKeyboardButton(text=upg_label, callback_data="biz:upgrade")],
         [InlineKeyboardButton(text="⬅️ В меню", callback_data=with_owner("menu:main", tg_id))],
     ]
-    await message.edit_text("\n".join(lines), reply_markup=_kb(rows))
+    # бизнес есть — пустырь сменяется бытовкой «ОФИС»
+    await show_photo_menu(message, BIZ_OFFICE_PHOTO, "biz_office_photo_id",
+                          "\n".join(lines), _kb(rows))
 
 
 @router.callback_query(F.data == "menu:business")
@@ -175,11 +184,13 @@ async def biz_card(cb: CallbackQuery):
         [InlineKeyboardButton(text=f"💰 Купить за {MOSQUITO_PRICE} Z", callback_data="biz:buy")],
         _back_row(tg_id),
     ]
-    await cb.message.edit_text(
+    # приходим с фото-пустыря — текст пересоздаст сообщение
+    await show_text_menu(
+        cb.message,
         f"{MOSQUITO_LORE}\n\n"
         f"Цена: <b>{MOSQUITO_PRICE} Z</b> · содержание {upkeep_for(1)} Z/день\n"
         f"Продукция: {MOSQUITO_EGGS[0]}–{MOSQUITO_EGGS[1]} 🥚 в час",
-        reply_markup=_kb(rows))
+        _kb(rows))
     await cb.answer()
 
 
@@ -230,11 +241,13 @@ async def biz_rename(cb: CallbackQuery, state: FSMContext):
     tg_id = cb.from_user.id
     if not await storage.get_business(tg_id, BIZ_MOSQUITO):
         return await cb.answer("Сначала купи бизнес", show_alert=True)
-    await state.set_state(BizStates.rename)
-    await state.update_data(chat_id=cb.message.chat.id, msg_id=cb.message.message_id)
-    await cb.message.edit_text(
+    # приходим с фото-офиса: сообщение пересоздастся, id запоминаем ПОСЛЕ показа
+    m = await show_text_menu(
+        cb.message,
         f"✏️ Новое название (до {NAME_MAXLEN} символов) одним сообщением.\n"
         f"Отменить — отправь «-».")
+    await state.set_state(BizStates.rename)
+    await state.update_data(chat_id=m.chat.id, msg_id=m.message_id)
     await cb.answer()
 
 
@@ -285,13 +298,15 @@ async def biz_launder(cb: CallbackQuery, state: FSMContext):
     if dirty_avail <= 0:
         return await cb.answer("Грязных денег на руках нет — нечего стирать 🤷", show_alert=True)
 
-    await state.set_state(BizStates.launder)
-    await state.update_data(chat_id=cb.message.chat.id, msg_id=cb.message.message_id)
-    await cb.message.edit_text(
+    # приходим с фото-офиса: сообщение пересоздастся, id запоминаем ПОСЛЕ показа
+    m = await show_text_menu(
+        cb.message,
         f"🧺 <b>Отмыв бабок</b>\n"
         f"Грязных на руках: <b>{dirty_avail} Z</b> · свободно в стирке: <b>{free_cap} Z</b>\n"
         f"Закладка вернётся чистой через {LAUNDER_HOURS} часа.\n\n"
         f"Сколько закладываем? Напиши число (до {limit}):")
+    await state.set_state(BizStates.launder)
+    await state.update_data(chat_id=m.chat.id, msg_id=m.message_id)
     await cb.answer()
 
 
@@ -367,13 +382,14 @@ async def biz_upgrade(cb: CallbackQuery):
         [InlineKeyboardButton(text=f"💰 Улучшить за {price} Z", callback_data="biz:upgrade:yes")],
         _back_row(tg_id),
     ]
-    await cb.message.edit_text(
+    await show_text_menu(
+        cb.message,
         f"⬆️ <b>Уровень {level + 1}</b>\n\n"
         f"Прибавка к продукции: {gain}.\n"
         f"Содержание вырастет до {upkeep_for(level + 1)} Z/день (зарплаты!), "
         f"зато простор отмыва — до {launder_cap_for(level + 1)} Z.\n"
         f"Цена: <b>{price} Z</b>",
-        reply_markup=_kb(rows))
+        _kb(rows))
     await cb.answer()
 
 
