@@ -15,9 +15,9 @@ from utils.guards import ensure_owner, with_owner
 from utils.notify import announce
 from utils.photo import show_photo_menu, show_screen
 
-# площадь с казино и аркадой — фон всех экранов мини-игр
+# площадь с казино, аркадой и козой — фон всех экранов мини-игр
 GAMES_PHOTO = "static/games.png"
-GAMES_PHOTO_META = "games_photo_id"
+GAMES_PHOTO_META = "games_photo_id_v2"  # v2: версия с козой (сброс кэша file_id)
 
 router = Router()
 
