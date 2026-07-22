@@ -60,6 +60,7 @@ async def inventory(cb: CallbackQuery):
         return await cb.answer("Сначала зарегистрируйся 😉", show_alert=True)
 
     items = await storage.get_inventory(tg_id)
+    lottery_counts = await storage.get_lottery_ticket_counts(tg_id=tg_id)
     buttons = []
     for key, qty in items.items():
         it = ITEMS.get(key)
@@ -68,11 +69,30 @@ async def inventory(cb: CallbackQuery):
         label = f"{it.emoji} {it.name}" + (f" ×{qty}" if it.max_qty > 1 else "")
         buttons.append(InlineKeyboardButton(text=label,
                                             callback_data=with_owner(f"invitem:{key}", tg_id)))
-    # два столбца
-    rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+    # Лотерейные билеты — виртуальные позиции из истории тиражей. Они не
+    # попадают в ITEMS/inventory, поэтому не продаются и не удаляются вместе
+    # с обычными предметами.
+    rows = []
+    if lottery_counts.active_tickets > 0:
+        rows.append([InlineKeyboardButton(
+            text=f"🎟 Лотерейные билетики ×{lottery_counts.active_tickets}",
+            callback_data=with_owner("lot:view", tg_id),
+        )])
+    if lottery_counts.expired_tickets > 0:
+        rows.append([InlineKeyboardButton(
+            text=f"🧾 Протухшие билетики ×{lottery_counts.expired_tickets}",
+            callback_data=with_owner("lot:expired", tg_id),
+        )])
+    # Обычные предметы — два столбца после полноширинных билетов.
+    rows.extend(buttons[i:i + 2] for i in range(0, len(buttons), 2))
     rows.append([InlineKeyboardButton(text="⬅️ В меню", callback_data=with_owner("menu:main", tg_id))])
 
-    text = "🎒 <b>Инвентарь</b>\nВыбери предмет:" if buttons else "🎒 <b>Инвентарь</b>\n\nпусто 🕸"
+    has_lottery_tickets = lottery_counts.active_tickets > 0 or lottery_counts.expired_tickets > 0
+    text = (
+        "🎒 <b>Инвентарь</b>\nВыбери предмет:"
+        if buttons or has_lottery_tickets
+        else "🎒 <b>Инвентарь</b>\n\nпусто 🕸"
+    )
     await show_photo_menu(cb.message, MAIN_PHOTO, MAIN_PHOTO_META, text, _kb(rows))
     await cb.answer()
 
