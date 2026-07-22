@@ -15,7 +15,7 @@ from aiogram.utils.markdown import hlink
 from content.shady import hide_message
 from db import storage
 from game.taxman import (HIDE_CAP, HIDE_CAP_IPHONE, HIDE_CD_KEY, HIDE_COOLDOWN_MIN, HIDE_KEY,
-                         HIDE_MINUTES, active_hidden, hidden_meta_key)
+                         HIDE_MINUTES, active_hidden)
 from utils.guards import ensure_private, with_owner
 from utils.notify import announce
 
@@ -90,16 +90,23 @@ async def shady_hide(cb: CallbackQuery, bot: Bot):
 
     has_iphone = await storage.get_item_qty(tg_id, "iphone") > 0
     cap = HIDE_CAP_IPHONE if has_iphone else HIDE_CAP
-    amount = min(dirty, cap)
-    # хотел спрятать пятую тысячу, но очко растянуто айфоном
-    iphone_blocked = has_iphone and dirty > HIDE_CAP_IPHONE
-
     now = datetime.now()
-    await storage.set_cooldown_until(
-        tg_id, HIDE_KEY, (now + timedelta(minutes=HIDE_MINUTES)).isoformat())
-    await storage.set_cooldown_until(
-        tg_id, HIDE_CD_KEY, (now + timedelta(minutes=HIDE_COOLDOWN_MIN)).isoformat())
-    await storage.set_meta(hidden_meta_key(tg_id), str(amount))
+    amount = await storage.activate_hidden_money(
+        tg_id,
+        cap,
+        (now + timedelta(minutes=HIDE_MINUTES)).isoformat(),
+        (now + timedelta(minutes=HIDE_COOLDOWN_MIN)).isoformat(),
+        now.isoformat(),
+    )
+    if amount <= 0:
+        await cb.answer("Состояние уже изменилось — проверь экран ещё раз", show_alert=True)
+        await _render(cb.message, tg_id)
+        return
+
+    # хотел спрятать пятую тысячу, но очко растянуто айфоном
+    iphone_blocked = (
+        has_iphone and dirty > HIDE_CAP_IPHONE and amount == HIDE_CAP_IPHONE
+    )
 
     who = hlink(cb.from_user.full_name, f"tg://user?id={tg_id}")
     await announce(bot, hide_message(who, amount, iphone_blocked))

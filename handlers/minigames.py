@@ -1,4 +1,4 @@
-"""Мини-игры. Пока одна — «Дойка козы» (кулдаун 12ч)."""
+"""Меню мини-игр и «Дойка козы» (кулдаун 1ч)."""
 import random
 from datetime import datetime, timedelta
 
@@ -37,6 +37,7 @@ async def games_menu(cb: CallbackQuery):
     if not await storage.get_profile(owner):
         return await cb.answer("Сначала зарегистрируйся 😉", show_alert=True)
     rows = [
+        [InlineKeyboardButton(text="🎟 Лотерея", callback_data=with_owner("lot:view", owner))],
         [InlineKeyboardButton(text="🐐 Подоить козу", callback_data=with_owner("goat:start", owner))],
         # «Бей Вовку» / «Рулетка» / «Рыбалка» — только в личке, без owner (ensure_private)
         [InlineKeyboardButton(text="🥊 Бей Вовку", callback_data="vovka:start")],

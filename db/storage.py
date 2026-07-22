@@ -1,16 +1,114 @@
 """Хранилище: игроки (для детекта новичков) и профили ZakharCompanion."""
+import asyncio
+import secrets
+from dataclasses import dataclass
 from datetime import datetime
+from typing import Callable, Literal
 
 import aiosqlite
 
 from config import config
 
 _db: aiosqlite.Connection | None = None
+_economy_db: aiosqlite.Connection | None = None
+_economy_lock = asyncio.Lock()
+
+LotteryPurchaseStatus = Literal[
+    "ok", "duplicate", "closed", "insufficient", "no_profile"
+]
+
+
+@dataclass(frozen=True)
+class LotteryRoundView:
+    round_id: int
+    starts_at: str
+    closes_at: str
+    ticket_price: int
+    fee_bps: int
+    total_tickets: int
+    own_tickets: int
+    gross_pool: int
+    prize_amount: int
+    balance: int
+
+    @property
+    def opens_at(self) -> str:
+        """Совместимый UI-alias: момент открытия тиража."""
+        return self.starts_at
+
+    @property
+    def prize_pool(self) -> int:
+        """Совместимый UI-alias: ожидаемый приз."""
+        return self.prize_amount
+
+
+@dataclass(frozen=True)
+class LotteryPurchaseResult:
+    status: LotteryPurchaseStatus
+    ticket_id: int | None
+    ticket_number: int | None
+    round_id: int | None
+    total_tickets: int
+    own_tickets: int
+    gross_pool: int
+    prize_amount: int
+    balance: int
+
+
+@dataclass(frozen=True)
+class LotteryTicketCounts:
+    active_tickets: int
+    expired_tickets: int
+
+    @property
+    def active(self) -> int:
+        return self.active_tickets
+
+    @property
+    def expired(self) -> int:
+        return self.expired_tickets
+
+
+@dataclass(frozen=True)
+class LotterySettlement:
+    round_id: int
+    winner_ticket_id: int | None
+    winner_ticket_number: int | None
+    winner_tg_id: int | None
+    ticket_count: int
+    gross_pool: int
+    house_cut: int
+    prize_amount: int
+    winner_balance_before: int | None
+    winner_balance_after: int | None
+    claim_token: str | None = None
+
+
+@dataclass(frozen=True)
+class LotteryNotification:
+    notification_id: int
+    round_id: int
+    kind: str
+    recipient_tg_id: int | None
+    attempts: int
+    next_attempt_at: str
+    winner_ticket_id: int
+    winner_ticket_number: int
+    winner_tg_id: int
+    winner_nick: str
+    ticket_count: int
+    gross_pool: int
+    house_cut: int
+    prize_amount: int
+    claim_token: str | None = None
 
 
 async def init() -> None:
-    global _db
+    global _db, _economy_db
+    if _db is not None or _economy_db is not None:
+        await close()
     _db = await aiosqlite.connect(config.db_path)
+    await _db.execute("PRAGMA busy_timeout = 5000")
     await _db.executescript(
         """
         CREATE TABLE IF NOT EXISTS players (
@@ -157,6 +255,127 @@ async def init() -> None:
     # рынок: лот может содержать несколько штук по одной цене
     await _ensure_column("market", "qty", "INTEGER DEFAULT 1")
     await _db.commit()
+    await _init_lottery_schema()
+
+    # Критичные денежные операции идут через отдельное соединение. В отличие
+    # от набора helper-вызовов на общем connection, BEGIN IMMEDIATE здесь
+    # действительно сериализует всю границу операции между coroutine/process.
+    if config.db_path == ":memory:":
+        # У двух обычных :memory: connection разные БД; сохраняем работоспособный
+        # тестовый режим, всё равно сериализуя операции через economy lock.
+        _economy_db = _db
+    else:
+        _economy_db = await aiosqlite.connect(config.db_path)
+        await _economy_db.execute("PRAGMA busy_timeout = 5000")
+
+
+async def close() -> None:
+    """Закрыть оба SQLite-соединения после остановки фоновых задач."""
+    global _db, _economy_db
+    async with _economy_lock:
+        economy_db = _economy_db
+        main_db = _db
+        _economy_db = None
+        _db = None
+        if economy_db is not None and economy_db is not main_db:
+            await economy_db.close()
+        if main_db is not None:
+            await main_db.close()
+
+
+async def _init_lottery_schema() -> None:
+    """Идемпотентная атомарная additive-миграция таблиц лотереи."""
+    statements = (
+        """
+        CREATE TABLE IF NOT EXISTS lottery_rounds (
+            id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+            starts_at             TEXT NOT NULL,
+            closes_at             TEXT NOT NULL,
+            status                TEXT NOT NULL DEFAULT 'open'
+                                      CHECK (status IN ('open', 'settled')),
+            active_slot           INTEGER UNIQUE
+                                      CHECK (active_slot IS NULL OR active_slot = 1),
+            ticket_price          INTEGER NOT NULL CHECK (ticket_price > 0),
+            fee_bps               INTEGER NOT NULL
+                                      CHECK (fee_bps >= 0 AND fee_bps <= 10000),
+            ticket_count          INTEGER,
+            gross_pool            INTEGER,
+            house_cut             INTEGER,
+            winner_ticket_id      INTEGER,
+            winner_tg_id          INTEGER,
+            prize_amount          INTEGER,
+            winner_balance_before INTEGER,
+            winner_balance_after  INTEGER,
+            settled_at            TEXT,
+            tax_processed_at      TEXT,
+            tax_claim_token       TEXT,
+            tax_claim_until       TEXT,
+            CHECK ((status = 'open' AND active_slot = 1)
+                OR (status = 'settled' AND active_slot IS NULL))
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS lottery_tickets (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            round_id      INTEGER NOT NULL,
+            ticket_number INTEGER NOT NULL,
+            tg_id         INTEGER NOT NULL,
+            purchased_at  TEXT NOT NULL,
+            paid_amount   INTEGER NOT NULL CHECK (paid_amount > 0),
+            dirty_amount  INTEGER NOT NULL DEFAULT 0
+                              CHECK (dirty_amount >= 0 AND dirty_amount <= paid_amount),
+            request_key   TEXT NOT NULL UNIQUE,
+            UNIQUE (round_id, ticket_number)
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS lottery_notifications (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            round_id        INTEGER NOT NULL,
+            kind            TEXT NOT NULL
+                                CHECK (kind IN ('winner_private', 'result_public')),
+            recipient_tg_id INTEGER,
+            attempts        INTEGER NOT NULL DEFAULT 0,
+            next_attempt_at TEXT NOT NULL,
+            sent_at         TEXT,
+            last_error      TEXT,
+            created_at      TEXT NOT NULL,
+            claim_token     TEXT,
+            claim_until     TEXT,
+            UNIQUE (round_id, kind)
+        )
+        """,
+        """CREATE INDEX IF NOT EXISTS lottery_rounds_due_idx
+           ON lottery_rounds (status, closes_at)""",
+        """CREATE INDEX IF NOT EXISTS lottery_tickets_round_idx
+           ON lottery_tickets (round_id, id)""",
+        """CREATE INDEX IF NOT EXISTS lottery_tickets_owner_idx
+           ON lottery_tickets (tg_id, round_id)""",
+        """CREATE INDEX IF NOT EXISTS lottery_notifications_due_idx
+           ON lottery_notifications (sent_at, next_attempt_at, id)""",
+    )
+    await _db.execute("BEGIN IMMEDIATE")
+    try:
+        for statement in statements:
+            await _db.execute(statement)
+        # Эти колонки нужны и при повторном запуске checkout, в котором
+        # таблицы лотереи уже успели появиться до введения lease-claims.
+        await _ensure_column("lottery_rounds", "tax_claim_token", "TEXT")
+        await _ensure_column("lottery_rounds", "tax_claim_until", "TEXT")
+        await _ensure_column("lottery_notifications", "claim_token", "TEXT")
+        await _ensure_column("lottery_notifications", "claim_until", "TEXT")
+        await _db.execute(
+            """CREATE INDEX IF NOT EXISTS lottery_rounds_tax_claim_idx
+               ON lottery_rounds (tax_processed_at, tax_claim_until, id)"""
+        )
+        await _db.execute(
+            """CREATE INDEX IF NOT EXISTS lottery_notifications_claim_idx
+               ON lottery_notifications (sent_at, next_attempt_at, claim_until, id)"""
+        )
+        await _db.commit()
+    except BaseException:
+        await _db.rollback()
+        raise
 
 
 async def _ensure_column(table: str, column: str, decl: str) -> None:
@@ -182,15 +401,12 @@ async def register_seen(nick: str) -> bool:
 
 async def create_profile(tg_id: int, username: str | None, nick: str) -> bool:
     """Создать профиль. False, если tg_id или ник уже заняты."""
-    try:
-        await _db.execute(
-            "INSERT INTO profiles (tg_id, username, nick) VALUES (?, ?, ?)",
-            (tg_id, username, nick),
-        )
-        await _db.commit()
-        return True
-    except aiosqlite.IntegrityError:
-        return False
+    cur = await _db.execute(
+        "INSERT OR IGNORE INTO profiles (tg_id, username, nick) VALUES (?, ?, ?)",
+        (tg_id, username, nick),
+    )
+    await _db.commit()
+    return cur.rowcount == 1
 
 
 async def get_profile(tg_id: int) -> tuple | None:
@@ -287,17 +503,97 @@ def hidden_meta_key(tg_id: int) -> str:
 
 async def hidden_now(tg_id: int) -> int:
     """Сколько Z сейчас спрятано от Густава (0 — прятка не активна)."""
-    cur = await _db.execute(
+    return await _hidden_amount_on(_db, tg_id, datetime.now())
+
+
+async def _hidden_amount_on(
+    connection: aiosqlite.Connection, tg_id: int, at: datetime
+) -> int:
+    """Прочитать спрятанную сумму через заданное соединение/транзакцию."""
+    cur = await connection.execute(
         "SELECT used_at FROM cooldowns WHERE tg_id = ? AND game = ?", (tg_id, HIDE_KEY)
     )
     row = await cur.fetchone()
-    if not row or datetime.fromisoformat(row[0]) <= datetime.now():
+    if not row or datetime.fromisoformat(row[0]) <= at:
         return 0
-    val = await get_meta(hidden_meta_key(tg_id))
+    cur = await connection.execute(
+        "SELECT value FROM meta WHERE key = ?", (hidden_meta_key(tg_id),)
+    )
+    meta_row = await cur.fetchone()
+    val = meta_row[0] if meta_row else None
     try:
         return int(val or 0)
     except ValueError:
         return 0
+
+
+async def activate_hidden_money(
+    tg_id: int,
+    cap: int,
+    hide_until: str,
+    cooldown_until: str,
+    now_iso: str | None = None,
+) -> int:
+    """Атомарно включить прятку и вернуть фактически спрятанную сумму.
+
+    Ноль означает, что профиль/грязные деньги/кулдаун уже изменились после
+    проверки handler. Одна writer-транзакция не даёт покупке лотерейного
+    билета увидеть срок прятки без соответствующей суммы в ``meta``.
+    """
+    if cap <= 0:
+        return 0
+    current_iso = now_iso or datetime.now().isoformat()
+    current = datetime.fromisoformat(current_iso)
+    if datetime.fromisoformat(hide_until) <= current:
+        raise ValueError("hide_until must be after now_iso")
+    if datetime.fromisoformat(cooldown_until) <= current:
+        raise ValueError("cooldown_until must be after now_iso")
+
+    async with _economy_lock:
+        connection = _economy_connection()
+        await connection.execute("BEGIN IMMEDIATE")
+        try:
+            cur = await connection.execute(
+                """SELECT game, used_at FROM cooldowns
+                   WHERE tg_id = ? AND game IN (?, ?)""",
+                (tg_id, HIDE_KEY, HIDE_CD_KEY),
+            )
+            for key, used_at in await cur.fetchall():
+                if key in (HIDE_KEY, HIDE_CD_KEY) and datetime.fromisoformat(used_at) > current:
+                    await connection.rollback()
+                    return 0
+
+            cur = await connection.execute(
+                "SELECT zbucks, dirty FROM profiles WHERE tg_id = ?", (tg_id,)
+            )
+            profile = await cur.fetchone()
+            if not profile:
+                await connection.rollback()
+                return 0
+            amount = min(cap, max(0, profile[0]), max(0, profile[1] or 0))
+            if amount <= 0:
+                await connection.rollback()
+                return 0
+
+            await connection.executemany(
+                """INSERT INTO cooldowns (tg_id, game, used_at) VALUES (?, ?, ?)
+                   ON CONFLICT (tg_id, game)
+                   DO UPDATE SET used_at = excluded.used_at""",
+                (
+                    (tg_id, HIDE_KEY, hide_until),
+                    (tg_id, HIDE_CD_KEY, cooldown_until),
+                ),
+            )
+            await connection.execute(
+                """INSERT INTO meta (key, value) VALUES (?, ?)
+                   ON CONFLICT (key) DO UPDATE SET value = excluded.value""",
+                (hidden_meta_key(tg_id), str(amount)),
+            )
+            await connection.commit()
+            return amount
+        except BaseException:
+            await connection.rollback()
+            raise
 
 
 async def spend_zbucks_traced(tg_id: int, amount: int) -> int | None:
@@ -308,23 +604,42 @@ async def spend_zbucks_traced(tg_id: int, amount: int) -> int | None:
     Из доступного первыми тратятся ГРЯЗНЫЕ (не спрятанные) — так от них
     можно избавиться, пока Густав едет с проверкой.
     """
-    cur = await _db.execute(
-        "SELECT zbucks, dirty FROM profiles WHERE tg_id = ?", (tg_id,)
-    )
-    row = await cur.fetchone()
-    if not row:
-        return None
-    balance, dirty = row[0], row[1] or 0
-    hidden = await hidden_now(tg_id)
-    if balance - hidden < amount:
-        return None
-    dirty_spend = min(amount, max(0, dirty - hidden))
-    await _db.execute(
-        "UPDATE profiles SET zbucks = zbucks - ?, dirty = dirty - ? WHERE tg_id = ?",
-        (amount, dirty_spend, tg_id),
-    )
-    await _db.commit()
-    return dirty_spend
+    if amount < 0:
+        raise ValueError("amount must be non-negative")
+    async with _economy_lock:
+        connection = _economy_connection()
+        await connection.execute("BEGIN IMMEDIATE")
+        try:
+            cur = await connection.execute(
+                "SELECT zbucks, dirty FROM profiles WHERE tg_id = ?", (tg_id,)
+            )
+            row = await cur.fetchone()
+            if not row:
+                await connection.rollback()
+                return None
+            balance, dirty = row[0], row[1] or 0
+            hidden = await _hidden_amount_on(connection, tg_id, datetime.now())
+            if balance - hidden < amount:
+                await connection.rollback()
+                return None
+            dirty_spend = min(amount, max(0, dirty - hidden))
+            await connection.execute(
+                """UPDATE profiles
+                   SET zbucks = zbucks - ?, dirty = dirty - ?
+                   WHERE tg_id = ?""",
+                (amount, dirty_spend, tg_id),
+            )
+            await connection.commit()
+            return dirty_spend
+        except BaseException:
+            await connection.rollback()
+            raise
+
+
+def _economy_connection() -> aiosqlite.Connection:
+    if _economy_db is None:
+        raise RuntimeError("storage.init() must be called first")
+    return _economy_db
 
 
 async def spend_zbucks(tg_id: int, amount: int) -> bool:
@@ -399,6 +714,729 @@ async def remove_item(tg_id: int, item: str, qty: int = 1) -> bool:
         )
     await _db.commit()
     return True
+
+
+# --- глобальная 24-часовая лотерея ---
+
+def _lottery_prize(gross_pool: int, fee_bps: int) -> int:
+    return gross_pool * (10_000 - fee_bps) // 10_000
+
+
+async def ensure_lottery_round(
+    now_iso: str,
+    closes_at: str,
+    ticket_price: int = 50,
+    fee_bps: int = 1_000,
+) -> int:
+    """Вернуть открытый тираж или атомарно создать первый."""
+    if ticket_price <= 0:
+        raise ValueError("ticket_price must be positive")
+    if not 0 <= fee_bps <= 10_000:
+        raise ValueError("fee_bps must be between 0 and 10000")
+    if datetime.fromisoformat(closes_at) <= datetime.fromisoformat(now_iso):
+        raise ValueError("lottery closes_at must be after starts_at")
+
+    async with _economy_lock:
+        connection = _economy_connection()
+        await connection.execute("BEGIN IMMEDIATE")
+        try:
+            cur = await connection.execute(
+                """SELECT id FROM lottery_rounds
+                   WHERE status = 'open' AND active_slot = 1
+                   ORDER BY id LIMIT 1"""
+            )
+            row = await cur.fetchone()
+            if row:
+                await connection.commit()
+                return row[0]
+
+            cur = await connection.execute(
+                """INSERT INTO lottery_rounds
+                   (starts_at, closes_at, status, active_slot, ticket_price, fee_bps)
+                   VALUES (?, ?, 'open', 1, ?, ?)""",
+                (now_iso, closes_at, ticket_price, fee_bps),
+            )
+            await connection.commit()
+            return cur.lastrowid
+        except BaseException:
+            await connection.rollback()
+            raise
+
+
+async def get_lottery_view(
+    tg_id: int, now_iso: str | None = None
+) -> LotteryRoundView | None:
+    """Снимок открытого тиража и участия конкретного игрока."""
+    del now_iso  # дедлайн показываем даже между закрытием кассы и scheduler tick
+    cur = await _db.execute(
+        """SELECT r.id, r.starts_at, r.closes_at, r.ticket_price, r.fee_bps,
+                  COUNT(t.id),
+                  COALESCE(SUM(CASE WHEN t.tg_id = ? THEN 1 ELSE 0 END), 0),
+                  COALESCE(SUM(t.paid_amount), 0),
+                  p.zbucks
+           FROM lottery_rounds r
+           JOIN profiles p ON p.tg_id = ?
+           LEFT JOIN lottery_tickets t ON t.round_id = r.id
+           WHERE r.status = 'open' AND r.active_slot = 1
+           GROUP BY r.id, p.zbucks
+           ORDER BY r.id DESC LIMIT 1""",
+        (tg_id, tg_id),
+    )
+    row = await cur.fetchone()
+    if not row:
+        return None
+    gross_pool = row[7]
+    return LotteryRoundView(
+        round_id=row[0],
+        starts_at=row[1],
+        closes_at=row[2],
+        ticket_price=row[3],
+        fee_bps=row[4],
+        total_tickets=row[5],
+        own_tickets=row[6],
+        gross_pool=gross_pool,
+        prize_amount=_lottery_prize(gross_pool, row[4]),
+        balance=row[8],
+    )
+
+
+async def get_lottery_ticket_counts(tg_id: int) -> LotteryTicketCounts:
+    """Количество активных и навсегда сохранённых протухших билетов."""
+    cur = await _db.execute(
+        """SELECT
+               COALESCE(SUM(CASE WHEN r.status = 'open' THEN 1 ELSE 0 END), 0),
+               COALESCE(SUM(CASE WHEN r.status = 'settled' THEN 1 ELSE 0 END), 0)
+           FROM lottery_tickets t
+           JOIN lottery_rounds r ON r.id = t.round_id
+           WHERE t.tg_id = ?""",
+        (tg_id,),
+    )
+    row = await cur.fetchone()
+    return LotteryTicketCounts(active_tickets=row[0], expired_tickets=row[1])
+
+
+async def _lottery_purchase_snapshot(
+    connection: aiosqlite.Connection,
+    *,
+    status: LotteryPurchaseStatus,
+    round_id: int | None,
+    tg_id: int,
+    ticket_id: int | None = None,
+    ticket_number: int | None = None,
+) -> LotteryPurchaseResult:
+    total_tickets = own_tickets = gross_pool = prize_amount = 0
+    if round_id is not None:
+        cur = await connection.execute(
+            """SELECT COUNT(t.id),
+                      COALESCE(SUM(CASE WHEN t.tg_id = ? THEN 1 ELSE 0 END), 0),
+                      COALESCE(SUM(t.paid_amount), 0),
+                      r.fee_bps
+               FROM lottery_rounds r
+               LEFT JOIN lottery_tickets t ON t.round_id = r.id
+               WHERE r.id = ?
+               GROUP BY r.id""",
+            (tg_id, round_id),
+        )
+        aggregate = await cur.fetchone()
+        if aggregate:
+            total_tickets, own_tickets, gross_pool, fee_bps = aggregate
+            prize_amount = _lottery_prize(gross_pool, fee_bps)
+
+    cur = await connection.execute(
+        "SELECT zbucks FROM profiles WHERE tg_id = ?", (tg_id,)
+    )
+    profile = await cur.fetchone()
+    return LotteryPurchaseResult(
+        status=status,
+        ticket_id=ticket_id,
+        ticket_number=ticket_number,
+        round_id=round_id,
+        total_tickets=total_tickets,
+        own_tickets=own_tickets,
+        gross_pool=gross_pool,
+        prize_amount=prize_amount,
+        balance=profile[0] if profile else 0,
+    )
+
+
+async def buy_lottery_ticket(
+    round_id: int,
+    tg_id: int,
+    request_key: str,
+    now_iso: str | None = None,
+) -> LotteryPurchaseResult:
+    """Атомарно списать цену и выпустить ровно один билет."""
+    if not request_key:
+        raise ValueError("request_key must not be empty")
+    current_iso = now_iso or datetime.now().isoformat()
+    current = datetime.fromisoformat(current_iso)
+
+    async with _economy_lock:
+        connection = _economy_connection()
+        await connection.execute("BEGIN IMMEDIATE")
+        try:
+            cur = await connection.execute(
+                """SELECT id, ticket_number, round_id, tg_id
+                   FROM lottery_tickets WHERE request_key = ?""",
+                (request_key,),
+            )
+            replay = await cur.fetchone()
+            if replay:
+                result = await _lottery_purchase_snapshot(
+                    connection,
+                    status="duplicate",
+                    round_id=replay[2],
+                    tg_id=tg_id,
+                    ticket_id=replay[0] if replay[3] == tg_id else None,
+                    ticket_number=replay[1] if replay[3] == tg_id else None,
+                )
+                await connection.commit()
+                return result
+
+            cur = await connection.execute(
+                """SELECT starts_at, closes_at, status, active_slot, ticket_price
+                   FROM lottery_rounds WHERE id = ?""",
+                (round_id,),
+            )
+            lottery_round = await cur.fetchone()
+            if (
+                not lottery_round
+                or lottery_round[2] != "open"
+                or lottery_round[3] != 1
+                or current < datetime.fromisoformat(lottery_round[0])
+                or current >= datetime.fromisoformat(lottery_round[1])
+            ):
+                result = await _lottery_purchase_snapshot(
+                    connection, status="closed", round_id=round_id, tg_id=tg_id
+                )
+                await connection.rollback()
+                return result
+
+            cur = await connection.execute(
+                "SELECT zbucks, dirty FROM profiles WHERE tg_id = ?", (tg_id,)
+            )
+            profile = await cur.fetchone()
+            if not profile:
+                result = await _lottery_purchase_snapshot(
+                    connection, status="no_profile", round_id=round_id, tg_id=tg_id
+                )
+                await connection.rollback()
+                return result
+
+            balance, dirty = profile[0], profile[1] or 0
+            price = lottery_round[4]
+            hidden = await _hidden_amount_on(connection, tg_id, current)
+            if balance - hidden < price:
+                result = await _lottery_purchase_snapshot(
+                    connection, status="insufficient", round_id=round_id, tg_id=tg_id
+                )
+                await connection.rollback()
+                return result
+
+            dirty_spend = min(price, max(0, dirty - hidden))
+            cur = await connection.execute(
+                """SELECT COALESCE(MAX(ticket_number), 0) + 1
+                   FROM lottery_tickets WHERE round_id = ?""",
+                (round_id,),
+            )
+            ticket_number = (await cur.fetchone())[0]
+            await connection.execute(
+                """UPDATE profiles
+                   SET zbucks = zbucks - ?, dirty = dirty - ?
+                   WHERE tg_id = ?""",
+                (price, dirty_spend, tg_id),
+            )
+            cur = await connection.execute(
+                """INSERT INTO lottery_tickets
+                   (round_id, ticket_number, tg_id, purchased_at,
+                    paid_amount, dirty_amount, request_key)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    round_id,
+                    ticket_number,
+                    tg_id,
+                    current_iso,
+                    price,
+                    dirty_spend,
+                    request_key,
+                ),
+            )
+            ticket_id = cur.lastrowid
+            result = await _lottery_purchase_snapshot(
+                connection,
+                status="ok",
+                round_id=round_id,
+                tg_id=tg_id,
+                ticket_id=ticket_id,
+                ticket_number=ticket_number,
+            )
+            await connection.commit()
+            return result
+        except BaseException:
+            await connection.rollback()
+            raise
+
+
+async def due_lottery_round_ids(now_iso: str | None = None) -> list[int]:
+    current_iso = now_iso or datetime.now().isoformat()
+    cur = await _db.execute(
+        """SELECT id FROM lottery_rounds
+           WHERE status = 'open' AND active_slot = 1 AND closes_at <= ?
+           ORDER BY id""",
+        (current_iso,),
+    )
+    return [row[0] for row in await cur.fetchall()]
+
+
+async def settle_lottery_round(
+    round_id: int,
+    now_iso: str,
+    next_closes_at: str,
+    next_ticket_price: int = 50,
+    next_fee_bps: int = 1_000,
+    randbelow: Callable[[int], int] = secrets.randbelow,
+) -> LotterySettlement | None:
+    """Exactly-once завершить тираж, выплатить приз и открыть следующий."""
+    if next_ticket_price <= 0:
+        raise ValueError("next_ticket_price must be positive")
+    if not 0 <= next_fee_bps <= 10_000:
+        raise ValueError("next_fee_bps must be between 0 and 10000")
+    if datetime.fromisoformat(next_closes_at) <= datetime.fromisoformat(now_iso):
+        raise ValueError("next_closes_at must be after now_iso")
+
+    async with _economy_lock:
+        connection = _economy_connection()
+        await connection.execute("BEGIN IMMEDIATE")
+        try:
+            cur = await connection.execute(
+                """SELECT fee_bps FROM lottery_rounds
+                   WHERE id = ? AND status = 'open' AND active_slot = 1
+                     AND closes_at <= ?""",
+                (round_id, now_iso),
+            )
+            round_row = await cur.fetchone()
+            if not round_row:
+                await connection.rollback()
+                return None
+
+            cur = await connection.execute(
+                """SELECT COUNT(*), COALESCE(SUM(paid_amount), 0)
+                   FROM lottery_tickets WHERE round_id = ?""",
+                (round_id,),
+            )
+            ticket_count, gross_pool = await cur.fetchone()
+            prize_amount = _lottery_prize(gross_pool, round_row[0])
+            house_cut = gross_pool - prize_amount
+            winner_ticket_id = winner_ticket_number = winner_tg_id = None
+            winner_balance_before = winner_balance_after = None
+
+            if ticket_count:
+                offset = randbelow(ticket_count)
+                if not 0 <= offset < ticket_count:
+                    raise ValueError("randbelow returned an invalid lottery offset")
+                cur = await connection.execute(
+                    """SELECT id, ticket_number, tg_id
+                       FROM lottery_tickets WHERE round_id = ?
+                       ORDER BY id LIMIT 1 OFFSET ?""",
+                    (round_id, offset),
+                )
+                winner = await cur.fetchone()
+                if not winner:
+                    raise RuntimeError("lottery winner ticket disappeared")
+                winner_ticket_id, winner_ticket_number, winner_tg_id = winner
+                cur = await connection.execute(
+                    "SELECT zbucks FROM profiles WHERE tg_id = ?", (winner_tg_id,)
+                )
+                profile = await cur.fetchone()
+                if not profile:
+                    raise RuntimeError("lottery winner profile disappeared")
+                winner_balance_before = profile[0]
+                winner_balance_after = winner_balance_before + prize_amount
+                await connection.execute(
+                    "UPDATE profiles SET zbucks = zbucks + ? WHERE tg_id = ?",
+                    (prize_amount, winner_tg_id),
+                )
+
+            cur = await connection.execute(
+                """UPDATE lottery_rounds
+                   SET status = 'settled', active_slot = NULL,
+                       ticket_count = ?, gross_pool = ?, house_cut = ?,
+                       winner_ticket_id = ?, winner_tg_id = ?, prize_amount = ?,
+                       winner_balance_before = ?, winner_balance_after = ?,
+                       settled_at = ?,
+                       tax_processed_at = CASE WHEN ? IS NULL THEN ? ELSE NULL END
+                   WHERE id = ? AND status = 'open' AND active_slot = 1""",
+                (
+                    ticket_count,
+                    gross_pool,
+                    house_cut,
+                    winner_ticket_id,
+                    winner_tg_id,
+                    prize_amount,
+                    winner_balance_before,
+                    winner_balance_after,
+                    now_iso,
+                    winner_tg_id,
+                    now_iso,
+                    round_id,
+                ),
+            )
+            if cur.rowcount != 1:
+                raise RuntimeError("lottery round was settled concurrently")
+
+            await connection.execute(
+                """INSERT INTO lottery_rounds
+                   (starts_at, closes_at, status, active_slot, ticket_price, fee_bps)
+                   VALUES (?, ?, 'open', 1, ?, ?)""",
+                (now_iso, next_closes_at, next_ticket_price, next_fee_bps),
+            )
+            if winner_tg_id is not None:
+                await connection.executemany(
+                    """INSERT INTO lottery_notifications
+                       (round_id, kind, recipient_tg_id, next_attempt_at, created_at)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (
+                        (round_id, "winner_private", winner_tg_id, now_iso, now_iso),
+                        (round_id, "result_public", None, now_iso, now_iso),
+                    ),
+                )
+
+            result = LotterySettlement(
+                round_id=round_id,
+                winner_ticket_id=winner_ticket_id,
+                winner_ticket_number=winner_ticket_number,
+                winner_tg_id=winner_tg_id,
+                ticket_count=ticket_count,
+                gross_pool=gross_pool,
+                house_cut=house_cut,
+                prize_amount=prize_amount,
+                winner_balance_before=winner_balance_before,
+                winner_balance_after=winner_balance_after,
+            )
+            await connection.commit()
+            return result
+        except BaseException:
+            await connection.rollback()
+            raise
+
+
+async def settle_due_lottery(
+    now_iso: str,
+    next_closes_at: str,
+    next_ticket_price: int = 50,
+    next_fee_bps: int = 1_000,
+    randbelow: Callable[[int], int] = secrets.randbelow,
+) -> LotterySettlement | None:
+    due = await due_lottery_round_ids(now_iso)
+    if not due:
+        return None
+    return await settle_lottery_round(
+        due[0],
+        now_iso,
+        next_closes_at,
+        next_ticket_price=next_ticket_price,
+        next_fee_bps=next_fee_bps,
+        randbelow=randbelow,
+    )
+
+
+def _lottery_settlement_from_row(
+    row, claim_token: str | None = None
+) -> LotterySettlement:
+    return LotterySettlement(
+        round_id=row[0],
+        winner_ticket_id=row[1],
+        winner_ticket_number=row[2],
+        winner_tg_id=row[3],
+        ticket_count=row[4] or 0,
+        gross_pool=row[5] or 0,
+        house_cut=row[6] or 0,
+        prize_amount=row[7] or 0,
+        winner_balance_before=row[8],
+        winner_balance_after=row[9],
+        claim_token=claim_token,
+    )
+
+
+async def get_lottery_settlement(round_id: int) -> LotterySettlement | None:
+    cur = await _db.execute(
+        """SELECT r.id, r.winner_ticket_id, t.ticket_number, r.winner_tg_id,
+                  r.ticket_count, r.gross_pool, r.house_cut, r.prize_amount,
+                  r.winner_balance_before, r.winner_balance_after
+           FROM lottery_rounds r
+           LEFT JOIN lottery_tickets t ON t.id = r.winner_ticket_id
+           WHERE r.id = ? AND r.status = 'settled'""",
+        (round_id,),
+    )
+    row = await cur.fetchone()
+    return _lottery_settlement_from_row(row) if row else None
+
+
+async def pending_lottery_tax() -> list[LotterySettlement]:
+    cur = await _db.execute(
+        """SELECT r.id, r.winner_ticket_id, t.ticket_number, r.winner_tg_id,
+                  r.ticket_count, r.gross_pool, r.house_cut, r.prize_amount,
+                  r.winner_balance_before, r.winner_balance_after
+           FROM lottery_rounds r
+           LEFT JOIN lottery_tickets t ON t.id = r.winner_ticket_id
+           WHERE r.status = 'settled' AND r.winner_tg_id IS NOT NULL
+             AND r.tax_processed_at IS NULL
+           ORDER BY r.id"""
+    )
+    return [_lottery_settlement_from_row(row) for row in await cur.fetchall()]
+
+
+async def claim_pending_lottery_tax(
+    claim_token: str,
+    now_iso: str,
+    claim_until: str,
+    limit: int = 20,
+) -> list[LotterySettlement]:
+    """Атомарно арендовать необработанные post-commit задания Густава."""
+    if not claim_token:
+        raise ValueError("claim_token must not be empty")
+    if datetime.fromisoformat(claim_until) <= datetime.fromisoformat(now_iso):
+        raise ValueError("claim_until must be after now_iso")
+
+    async with _economy_lock:
+        connection = _economy_connection()
+        await connection.execute("BEGIN IMMEDIATE")
+        try:
+            cur = await connection.execute(
+                """SELECT id FROM lottery_rounds
+                   WHERE status = 'settled' AND winner_tg_id IS NOT NULL
+                     AND tax_processed_at IS NULL
+                     AND (tax_claim_until IS NULL OR tax_claim_until <= ?)
+                   ORDER BY id LIMIT ?""",
+                (now_iso, max(1, limit)),
+            )
+            round_ids = [row[0] for row in await cur.fetchall()]
+            if not round_ids:
+                await connection.rollback()
+                return []
+
+            placeholders = ", ".join("?" for _ in round_ids)
+            await connection.execute(
+                f"""UPDATE lottery_rounds
+                    SET tax_claim_token = ?, tax_claim_until = ?
+                    WHERE id IN ({placeholders})
+                      AND tax_processed_at IS NULL
+                      AND (tax_claim_until IS NULL OR tax_claim_until <= ?)""",
+                (claim_token, claim_until, *round_ids, now_iso),
+            )
+            cur = await connection.execute(
+                f"""SELECT r.id, r.winner_ticket_id, t.ticket_number,
+                            r.winner_tg_id, r.ticket_count, r.gross_pool,
+                            r.house_cut, r.prize_amount,
+                            r.winner_balance_before, r.winner_balance_after
+                     FROM lottery_rounds r
+                     LEFT JOIN lottery_tickets t ON t.id = r.winner_ticket_id
+                     WHERE r.id IN ({placeholders}) AND r.tax_claim_token = ?
+                     ORDER BY r.id""",
+                (*round_ids, claim_token),
+            )
+            jobs = [
+                _lottery_settlement_from_row(row, claim_token)
+                for row in await cur.fetchall()
+            ]
+            await connection.commit()
+            return jobs
+        except BaseException:
+            await connection.rollback()
+            raise
+
+
+async def mark_lottery_tax_processed(
+    round_id: int,
+    claim_token: str,
+    processed_at: str | None = None,
+) -> bool:
+    """Завершить только принадлежащий вызывающему lease."""
+    async with _economy_lock:
+        connection = _economy_connection()
+        await connection.execute("BEGIN IMMEDIATE")
+        try:
+            cur = await connection.execute(
+                """UPDATE lottery_rounds
+                   SET tax_processed_at = ?, tax_claim_token = NULL,
+                       tax_claim_until = NULL
+                   WHERE id = ? AND status = 'settled'
+                     AND tax_processed_at IS NULL AND tax_claim_token = ?""",
+                (
+                    processed_at or datetime.now().isoformat(),
+                    round_id,
+                    claim_token,
+                ),
+            )
+            await connection.commit()
+            return cur.rowcount == 1
+        except BaseException:
+            await connection.rollback()
+            raise
+
+
+async def release_lottery_tax_claim(round_id: int, claim_token: str) -> bool:
+    """Освободить lease после ошибки Густава, чтобы следующий tick повторил."""
+    async with _economy_lock:
+        connection = _economy_connection()
+        await connection.execute("BEGIN IMMEDIATE")
+        try:
+            cur = await connection.execute(
+                """UPDATE lottery_rounds
+                   SET tax_claim_token = NULL, tax_claim_until = NULL
+                   WHERE id = ? AND tax_processed_at IS NULL
+                     AND tax_claim_token = ?""",
+                (round_id, claim_token),
+            )
+            await connection.commit()
+            return cur.rowcount == 1
+        except BaseException:
+            await connection.rollback()
+            raise
+
+
+async def pending_lottery_notifications(
+    now_iso: str | None = None, limit: int = 20
+) -> list[LotteryNotification]:
+    current_iso = now_iso or datetime.now().isoformat()
+    cur = await _db.execute(
+        """SELECT n.id, n.round_id, n.kind, n.recipient_tg_id, n.attempts,
+                  n.next_attempt_at, r.winner_ticket_id, t.ticket_number,
+                  r.winner_tg_id, COALESCE(p.nick, 'Игрок'), r.ticket_count,
+                  r.gross_pool, r.house_cut, r.prize_amount
+           FROM lottery_notifications n
+           JOIN lottery_rounds r ON r.id = n.round_id
+           JOIN lottery_tickets t ON t.id = r.winner_ticket_id
+           LEFT JOIN profiles p ON p.tg_id = r.winner_tg_id
+           WHERE n.sent_at IS NULL AND n.next_attempt_at <= ?
+             AND (n.claim_until IS NULL OR n.claim_until <= ?)
+           ORDER BY n.next_attempt_at, n.id
+           LIMIT ?""",
+        (current_iso, current_iso, max(1, limit)),
+    )
+    return [LotteryNotification(*row) for row in await cur.fetchall()]
+
+
+async def claim_lottery_notifications(
+    claim_token: str,
+    now_iso: str,
+    claim_until: str,
+    limit: int = 20,
+) -> list[LotteryNotification]:
+    """Атомарно арендовать due outbox-строки для одного worker."""
+    if not claim_token:
+        raise ValueError("claim_token must not be empty")
+    if datetime.fromisoformat(claim_until) <= datetime.fromisoformat(now_iso):
+        raise ValueError("claim_until must be after now_iso")
+
+    async with _economy_lock:
+        connection = _economy_connection()
+        await connection.execute("BEGIN IMMEDIATE")
+        try:
+            cur = await connection.execute(
+                """SELECT id FROM lottery_notifications
+                   WHERE sent_at IS NULL AND next_attempt_at <= ?
+                     AND (claim_until IS NULL OR claim_until <= ?)
+                   ORDER BY next_attempt_at, id LIMIT ?""",
+                (now_iso, now_iso, max(1, limit)),
+            )
+            notification_ids = [row[0] for row in await cur.fetchall()]
+            if not notification_ids:
+                await connection.rollback()
+                return []
+
+            placeholders = ", ".join("?" for _ in notification_ids)
+            await connection.execute(
+                f"""UPDATE lottery_notifications
+                    SET claim_token = ?, claim_until = ?
+                    WHERE id IN ({placeholders}) AND sent_at IS NULL
+                      AND next_attempt_at <= ?
+                      AND (claim_until IS NULL OR claim_until <= ?)""",
+                (
+                    claim_token,
+                    claim_until,
+                    *notification_ids,
+                    now_iso,
+                    now_iso,
+                ),
+            )
+            cur = await connection.execute(
+                f"""SELECT n.id, n.round_id, n.kind, n.recipient_tg_id,
+                            n.attempts, n.next_attempt_at, r.winner_ticket_id,
+                            t.ticket_number, r.winner_tg_id,
+                            COALESCE(p.nick, 'Игрок'), r.ticket_count,
+                            r.gross_pool, r.house_cut, r.prize_amount,
+                            n.claim_token
+                     FROM lottery_notifications n
+                     JOIN lottery_rounds r ON r.id = n.round_id
+                     JOIN lottery_tickets t ON t.id = r.winner_ticket_id
+                     LEFT JOIN profiles p ON p.tg_id = r.winner_tg_id
+                     WHERE n.id IN ({placeholders}) AND n.claim_token = ?
+                     ORDER BY n.next_attempt_at, n.id""",
+                (*notification_ids, claim_token),
+            )
+            jobs = [LotteryNotification(*row) for row in await cur.fetchall()]
+            await connection.commit()
+            return jobs
+        except BaseException:
+            await connection.rollback()
+            raise
+
+
+async def mark_lottery_notification_sent(
+    notification_id: int,
+    claim_token: str,
+    sent_at: str | None = None,
+) -> bool:
+    async with _economy_lock:
+        connection = _economy_connection()
+        await connection.execute("BEGIN IMMEDIATE")
+        try:
+            cur = await connection.execute(
+                """UPDATE lottery_notifications
+                   SET sent_at = ?, last_error = NULL,
+                       claim_token = NULL, claim_until = NULL
+                   WHERE id = ? AND sent_at IS NULL AND claim_token = ?""",
+                (
+                    sent_at or datetime.now().isoformat(),
+                    notification_id,
+                    claim_token,
+                ),
+            )
+            await connection.commit()
+            return cur.rowcount == 1
+        except BaseException:
+            await connection.rollback()
+            raise
+
+
+async def mark_lottery_notification_retry(
+    notification_id: int,
+    claim_token: str,
+    next_attempt_at: str,
+    last_error: str,
+) -> bool:
+    async with _economy_lock:
+        connection = _economy_connection()
+        await connection.execute("BEGIN IMMEDIATE")
+        try:
+            cur = await connection.execute(
+                """UPDATE lottery_notifications
+                   SET attempts = attempts + 1, next_attempt_at = ?, last_error = ?,
+                       claim_token = NULL, claim_until = NULL
+                   WHERE id = ? AND sent_at IS NULL AND claim_token = ?""",
+                (
+                    next_attempt_at,
+                    last_error[:1000],
+                    notification_id,
+                    claim_token,
+                ),
+            )
+            await connection.commit()
+            return cur.rowcount == 1
+        except BaseException:
+            await connection.rollback()
+            raise
 
 
 # --- рынок ---
@@ -829,16 +1867,14 @@ async def self_employed_ids() -> list[int]:
 async def create_business(tg_id: int, biz: str, tier: str,
                           produce_at: str, upkeep_at: str) -> bool:
     """Создать бизнес. False — такой у игрока уже есть."""
-    try:
-        await _db.execute(
-            """INSERT INTO businesses (tg_id, biz, tier, produce_at, upkeep_at)
-               VALUES (?, ?, ?, ?, ?)""",
-            (tg_id, biz, tier, produce_at, upkeep_at),
-        )
-        await _db.commit()
-        return True
-    except aiosqlite.IntegrityError:
-        return False
+    cur = await _db.execute(
+        """INSERT OR IGNORE INTO businesses
+           (tg_id, biz, tier, produce_at, upkeep_at)
+           VALUES (?, ?, ?, ?, ?)""",
+        (tg_id, biz, tier, produce_at, upkeep_at),
+    )
+    await _db.commit()
+    return cur.rowcount == 1
 
 
 async def get_business(tg_id: int, biz: str) -> tuple | None:

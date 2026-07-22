@@ -12,12 +12,14 @@ from game.business import run_business_scheduler
 from game.daily import run_daily_scheduler
 from game.debts import run_debts_scheduler
 from game.fishing import run_fishing_scheduler
+from game.lottery import ensure_current_round, run_lottery_scheduler
 from game.market import run_market_scheduler
 from game.richest import run_richest_watcher
 from game.taxman import run_gustav_scheduler
 from handlers import (admin, bets, business, cashier, chef, companion, courier, farca,
-                      finance, fishing, inventory, loan, market, minigames, pranks,
-                      registration, roulette, scammer, shady, shop, stats, vovka, vpn, work)
+                      finance, fishing, inventory, loan, lottery, market, minigames,
+                      pranks, registration, roulette, scammer, shady, shop, stats,
+                      vovka, vpn, work)
 from mc.poller import run_poller
 
 logging.basicConfig(
@@ -32,59 +34,66 @@ async def main() -> None:
 
     await storage.init()
 
-    bot = Bot(config.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-    dp = Dispatcher()
-    dp.include_router(admin.router)
-    dp.include_router(stats.router)
-    dp.include_router(registration.router)
-    dp.include_router(minigames.router)
-    dp.include_router(vovka.router)
-    dp.include_router(roulette.router)
-    dp.include_router(fishing.router)
-    dp.include_router(shop.router)
-    dp.include_router(inventory.router)
-    dp.include_router(work.router)
-    dp.include_router(cashier.router)
-    dp.include_router(courier.router)
-    dp.include_router(chef.router)
-    dp.include_router(vpn.router)
-    dp.include_router(farca.router)
-    dp.include_router(scammer.router)
-    dp.include_router(market.router)
-    dp.include_router(bets.router)
-    dp.include_router(loan.router)
-    dp.include_router(finance.router)
-    dp.include_router(shady.router)
-    dp.include_router(business.router)
-    dp.include_router(pranks.router)
-    dp.include_router(companion.router)
-
-    # фоновый опрос Minecraft-сервера.
-    # Ссылку на задачу обязательно держим: иначе сборщик мусора
-    # уничтожит её прямо во время работы ("Task was destroyed but it is pending").
-    poller_task = asyncio.create_task(run_poller(bot))
-    daily_task = asyncio.create_task(run_daily_scheduler(bot))
-    market_task = asyncio.create_task(run_market_scheduler(bot))
-    bets_task = asyncio.create_task(run_bets_scheduler(bot))
-    debts_task = asyncio.create_task(run_debts_scheduler(bot))
-    richest_task = asyncio.create_task(run_richest_watcher(bot))
-    fishing_task = asyncio.create_task(run_fishing_scheduler(bot))
-    gustav_task = asyncio.create_task(run_gustav_scheduler(bot))
-    business_task = asyncio.create_task(run_business_scheduler(bot))
-
-    logging.info("Бот запущен")
     try:
-        await dp.start_polling(bot)
+        # Polling не должен стартовать без долговечного текущего тиража.
+        await ensure_current_round()
+
+        bot = Bot(config.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+        dp = Dispatcher()
+        dp.include_router(admin.router)
+        dp.include_router(stats.router)
+        dp.include_router(registration.router)
+        dp.include_router(minigames.router)
+        dp.include_router(lottery.router)
+        dp.include_router(vovka.router)
+        dp.include_router(roulette.router)
+        dp.include_router(fishing.router)
+        dp.include_router(shop.router)
+        dp.include_router(inventory.router)
+        dp.include_router(work.router)
+        dp.include_router(cashier.router)
+        dp.include_router(courier.router)
+        dp.include_router(chef.router)
+        dp.include_router(vpn.router)
+        dp.include_router(farca.router)
+        dp.include_router(scammer.router)
+        dp.include_router(market.router)
+        dp.include_router(bets.router)
+        dp.include_router(loan.router)
+        dp.include_router(finance.router)
+        dp.include_router(shady.router)
+        dp.include_router(business.router)
+        dp.include_router(pranks.router)
+        dp.include_router(companion.router)
+
+        # Сильные ссылки не дают сборщику мусора уничтожить фоновые
+        # задачи, а единый список позволяет корректно дождаться cancel.
+        tasks = [
+            asyncio.create_task(run_poller(bot)),
+            asyncio.create_task(run_daily_scheduler(bot)),
+            asyncio.create_task(run_market_scheduler(bot)),
+            asyncio.create_task(run_bets_scheduler(bot)),
+            asyncio.create_task(run_debts_scheduler(bot)),
+            asyncio.create_task(run_richest_watcher(bot)),
+            asyncio.create_task(run_fishing_scheduler(bot)),
+            asyncio.create_task(run_gustav_scheduler(bot)),
+            asyncio.create_task(run_business_scheduler(bot)),
+            asyncio.create_task(run_lottery_scheduler(bot)),
+        ]
+
+        logging.info("Бот запущен")
+        try:
+            # Сессию закроем сами после cancel update-handlers: aiogram
+            # не ждёт их автоматически при остановке polling.
+            await dp.start_polling(bot, close_bot_session=False)
+        finally:
+            update_tasks = list(dp._handle_update_tasks)
+            for task in [*tasks, *update_tasks]:
+                task.cancel()
+            await asyncio.gather(*tasks, *update_tasks, return_exceptions=True)
+            await bot.session.close()
     finally:
-        poller_task.cancel()
-        daily_task.cancel()
-        market_task.cancel()
-        bets_task.cancel()
-        debts_task.cancel()
-        richest_task.cancel()
-        fishing_task.cancel()
-        gustav_task.cancel()
-        business_task.cancel()
+        await storage.close()
 
 
 if __name__ == "__main__":
