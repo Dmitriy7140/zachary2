@@ -10,11 +10,14 @@ from datetime import datetime, timedelta
 from typing import Callable
 
 from aiogram import Bot
+from aiogram.types import BufferedInputFile
 from aiogram.utils.markdown import hlink
 
 from config import config
+from content import lottery as lottery_content
 from db import storage
 from game.taxman import maybe_gustav
+from scripts.lottery_winner_image import render_winner_png
 
 log = logging.getLogger(__name__)
 
@@ -272,27 +275,34 @@ async def _send_notification(bot: Bot, notification) -> None:
         return
 
     if notification.kind == PUBLIC_NOTIFICATION:
-        winner = await _winner_label(notification)
-        await bot.send_message(
+        winner_nick, winner = await _winner_identity(notification)
+        png = await asyncio.to_thread(render_winner_png, winner_nick)
+        await bot.send_photo(
             chat_id=config.channel_id,
             message_thread_id=config.thread_id or None,
-            text=_public_result_text(notification, winner),
+            photo=BufferedInputFile(
+                png,
+                filename=f"lottery_winner_{notification.round_id}.png",
+            ),
+            caption=_public_result_text(notification, winner),
         )
         return
 
     raise ValueError(f"неизвестный тип lottery notification: {notification.kind!r}")
 
 
-async def _winner_label(notification) -> str:
-    """HTML-safe Telegram-ссылка на победителя."""
+async def _winner_identity(notification) -> tuple[str, str]:
+    """Чистый ник для картинки и HTML-safe Telegram-ссылка для подписи."""
     tg_id = notification.winner_tg_id
     if tg_id is None:
         raise ValueError("у результата нет победителя")
 
     profile = await storage.get_profile(tg_id)
-    nick = profile[2] if profile else notification.winner_nick
+    stored_nick = profile[2] if profile else notification.winner_nick
+    nick = str(stored_nick or "Игрок")
+    mention_title = nick if nick.startswith("@") else f"@{nick}"
     # hlink сам экранирует title для HTML parse mode.
-    return hlink(str(nick or "Игрок"), f"tg://user?id={int(tg_id)}")
+    return nick, hlink(mention_title, f"tg://user?id={int(tg_id)}")
 
 
 def _private_result_text(notification) -> str:
@@ -305,12 +315,10 @@ def _private_result_text(notification) -> str:
 
 
 def _public_result_text(notification, winner: str) -> str:
-    return (
-        f"🎟 <b>Лотерея #{notification.round_id} разыграна!</b>\n"
-        f"Билет №{notification.winner_ticket_number} игрока {winner} "
-        f"выиграл <b>{notification.prize_amount} Z</b>.\n"
-        f"Банк: {notification.gross_pool} Z, "
-        f"комиссия: {notification.house_cut} Z."
+    return lottery_content.winner_announcement(
+        winner,
+        notification.prize_amount,
+        notification.winner_ticket_number,
     )
 
 

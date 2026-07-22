@@ -533,15 +533,59 @@ class LotteryStorageTests(_TemporaryStorageCase):
 class _FakeBot:
     def __init__(self, *, fail: bool) -> None:
         self.fail = fail
-        self.calls: list[tuple[tuple, dict]] = []
+        self.calls: list[tuple[str, tuple, dict]] = []
 
     async def send_message(self, *args, **kwargs) -> None:
-        self.calls.append((args, kwargs))
+        self.calls.append(("message", args, kwargs))
+        if self.fail:
+            raise RuntimeError("Telegram unavailable")
+
+    async def send_photo(self, *args, **kwargs) -> None:
+        self.calls.append(("photo", args, kwargs))
         if self.fail:
             raise RuntimeError("Telegram unavailable")
 
 
 class LotterySchedulerTests(_TemporaryStorageCase):
+    async def test_public_result_sends_generated_photo_to_channel_thread(self) -> None:
+        notification = SimpleNamespace(
+            kind=lottery.PUBLIC_NOTIFICATION,
+            round_id=9,
+            winner_tg_id=1,
+            winner_nick="Winner",
+            winner_ticket_number=44,
+            prize_amount=12_345,
+        )
+        bot = _FakeBot(fail=False)
+        identity = AsyncMock(
+            return_value=(
+                "Winner",
+                '<a href="tg://user?id=1">@Winner</a>',
+            )
+        )
+
+        with (
+            patch.object(lottery, "_winner_identity", identity),
+            patch.object(lottery, "render_winner_png", return_value=b"png") as render,
+            patch.object(config, "channel_id", -100123),
+            patch.object(config, "thread_id", 456),
+        ):
+            await lottery._send_notification(bot, notification)
+
+        identity.assert_awaited_once_with(notification)
+        render.assert_called_once_with("Winner")
+        self.assertEqual(1, len(bot.calls))
+        kind, args, kwargs = bot.calls[0]
+        self.assertEqual("photo", kind)
+        self.assertEqual((), args)
+        self.assertEqual(-100123, kwargs["chat_id"])
+        self.assertEqual(456, kwargs["message_thread_id"])
+        self.assertEqual(b"png", kwargs["photo"].data)
+        self.assertEqual("lottery_winner_9.png", kwargs["photo"].filename)
+        self.assertIn("@Winner", kwargs["caption"])
+        self.assertIn("12 345 Z", kwargs["caption"])
+        self.assertIn("№44</b> — «стульчики»", kwargs["caption"])
+
     async def test_parallel_ticks_claim_post_commit_work_once(self) -> None:
         await storage.init()
         round_id = await lottery.ensure_current_round(STARTS_AT)
@@ -566,6 +610,7 @@ class LotterySchedulerTests(_TemporaryStorageCase):
 
         gustav.assert_awaited_once_with(bot, 1, 0, 45)
         self.assertEqual(2, len(bot.calls))
+        self.assertCountEqual(["message", "photo"], [call[0] for call in bot.calls])
         self.assertEqual([], await storage.pending_lottery_tax())
         self.assertEqual(
             [],
@@ -601,6 +646,7 @@ class LotterySchedulerTests(_TemporaryStorageCase):
 
         self.assertEqual(2, gustav.await_count)
         self.assertEqual(2, len(bot.calls))
+        self.assertCountEqual(["message", "photo"], [call[0] for call in bot.calls])
         self.assertEqual(45, (await storage.get_profile(1))[3])
         self.assertEqual([], await storage.pending_lottery_tax())
 
@@ -636,6 +682,9 @@ class LotterySchedulerTests(_TemporaryStorageCase):
             )
             self.assertEqual([], await storage.pending_lottery_tax())
             self.assertEqual(2, len(failing_bot.calls))
+            self.assertCountEqual(
+                ["message", "photo"], [call[0] for call in failing_bot.calls]
+            )
             self.assertEqual(
                 [],
                 await storage.pending_lottery_notifications(
@@ -657,6 +706,9 @@ class LotterySchedulerTests(_TemporaryStorageCase):
 
         self.assertEqual(1, gustav.await_count)
         self.assertEqual(2, len(successful_bot.calls))
+        self.assertCountEqual(
+            ["message", "photo"], [call[0] for call in successful_bot.calls]
+        )
         self.assertEqual(
             [],
             await storage.pending_lottery_notifications(
