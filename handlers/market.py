@@ -1,8 +1,8 @@
 """Рынок: «Продажа» — поставка товаров в общий сток, «Покупка» — стакан.
 
 Продажа: лот продаётся ВЕСЬ разом через (цена − минимум) × 10 минут
-(по минималке — мгновенно). Суммарно в активных лотах не больше SELL_LIMIT
-штук. Проданное попадает в market_stock с наценкой 10% и доступно другим
+(по минималке — мгновенно). Суммарно в активных лотах не больше вместимости
+палеты игрока. Проданное попадает в market_stock с наценкой 10% и доступно другим
 игрокам в «Покупке» — игроки сами привозят товары на рынок.
 """
 from datetime import datetime, timedelta
@@ -17,7 +17,8 @@ from content.market import market_vibe
 from content.zhmyzhko import proletarian
 from db import storage
 from game.items import ITEMS, sellable_items
-from game.market import SELL_LIMIT, buy_price
+from game.market import (MARKET_PALLET_BASE_LIMIT, MARKET_PALLET_UPGRADE_PRICE,
+                         MARKET_PALLET_UPGRADED_LIMIT, buy_price)
 from game.taxman import grant
 from utils.cleanup import delete_later
 from utils.guards import ensure_private, with_owner
@@ -82,18 +83,28 @@ async def market_menu(cb: CallbackQuery):
 
 async def _render_sell(message, tg_id: int) -> None:
     in_sale = await storage.active_listing_qty(tg_id)
-    lines = ["💰 <b>Продажа</b>", f"В продаже: {in_sale}/{SELL_LIMIT} шт", ""]
+    sell_limit = await storage.market_sell_limit(tg_id)
+    lines = [
+        "💰 <b>Продажа</b>",
+        f"В продаже: {in_sale}/{sell_limit} шт",
+        f"Палета вмещает до {sell_limit} товаров за раз.",
+        "",
+    ]
 
     listings = await storage.get_listings(tg_id)
     if listings:
         lines.append("<b>Твои лоты:</b>")
-        for item, price, sell_at, qty in listings:
+        # Палета может вместить 40 единиц; не превращаем caption Telegram в
+        # простыню, если игрок выставил много отдельных лотов.
+        for item, price, sell_at, qty in listings[:8]:
             it = ITEMS.get(item)
             label = f"{it.emoji} {it.name}" if it else item
             cnt = f" ×{qty}" if (qty or 1) > 1 else ""
             secs = max(0, int((datetime.fromisoformat(sell_at) - datetime.now()).total_seconds()))
             lines.append(f"• {label}{cnt} — {price} Z/шт "
                          f"(продадутся через {secs // 3600}ч {secs % 3600 // 60}м)")
+        if len(listings) > 8:
+            lines.append(f"• … и ещё {len(listings) - 8} лотов")
         lines.append("")
 
     inv = await storage.get_inventory(tg_id)
@@ -109,6 +120,15 @@ async def _render_sell(message, tg_id: int) -> None:
         lines.append("Продавать пока нечего — сходи на дойку 🐐")
 
     rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+    if sell_limit == MARKET_PALLET_BASE_LIMIT:
+        rows.append([
+            InlineKeyboardButton(
+                text=("📦 Улучшить палету до "
+                      f"{MARKET_PALLET_UPGRADED_LIMIT} товаров — "
+                      f"{MARKET_PALLET_UPGRADE_PRICE} Z"),
+                callback_data="market:pallet:upgrade",
+            )
+        ])
     rows.append([InlineKeyboardButton(text="⬅️ К рынку", callback_data="menu:market")])
     await _show(message, "\n".join(lines), rows)
 
@@ -121,6 +141,62 @@ async def market_sellmenu(cb: CallbackQuery):
         return await cb.answer("Сначала зарегистрируйся 😉", show_alert=True)
     await _render_sell(cb.message, cb.from_user.id)
     await cb.answer()
+
+
+@router.callback_query(F.data == "market:pallet:upgrade")
+async def market_pallet_upgrade(cb: CallbackQuery):
+    """Показать подтверждение одноразового расширения палеты."""
+    if not await ensure_private(cb):
+        return
+    tg_id = cb.from_user.id
+    if not await storage.get_profile(tg_id):
+        return await cb.answer("Сначала зарегистрируйся 😉", show_alert=True)
+    sell_limit = await storage.market_sell_limit(tg_id)
+    if sell_limit >= MARKET_PALLET_UPGRADED_LIMIT:
+        return await cb.answer("Палета уже вмещает 40 товаров", show_alert=True)
+
+    rows = [
+        [InlineKeyboardButton(
+            text=f"💰 Улучшить за {MARKET_PALLET_UPGRADE_PRICE} Z",
+            callback_data="market:pallet:confirm",
+        )],
+        [InlineKeyboardButton(text="⬅️ К продаже", callback_data="market:sellmenu")],
+    ]
+    await _show(
+        cb.message,
+        "📦 <b>Улучшение палеты</b>\n\n"
+        f"Сейчас она вмещает {sell_limit} товаров в продаже одновременно.\n"
+        f"За <b>{MARKET_PALLET_UPGRADE_PRICE} Z</b> грузчики приколотят ещё досок — "
+        f"вместимость вырастет до <b>{MARKET_PALLET_UPGRADED_LIMIT} товаров</b>.\n\n"
+        "Улучшение одноразовое. Берём?",
+        rows,
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data == "market:pallet:confirm")
+async def market_pallet_confirm(cb: CallbackQuery):
+    """Атомарно купить палету и перерисовать актуальный экран продажи."""
+    if not await ensure_private(cb):
+        return
+    tg_id = cb.from_user.id
+    if not await storage.get_profile(tg_id):
+        return await cb.answer("Сначала зарегистрируйся 😉", show_alert=True)
+
+    status = await storage.upgrade_market_pallet(
+        tg_id, price=MARKET_PALLET_UPGRADE_PRICE,
+    )
+    if status == "upgraded":
+        await _render_sell(cb.message, tg_id)
+        return await cb.answer("Палета расширена: теперь в продаже до 40 товаров!")
+    if status == "already_upgraded":
+        await _render_sell(cb.message, tg_id)
+        return await cb.answer("Палета уже улучшена", show_alert=True)
+    if status == "insufficient_funds":
+        return await cb.answer(
+            f"Не хватает Z (нужно {MARKET_PALLET_UPGRADE_PRICE})", show_alert=True,
+        )
+    return await cb.answer("Не удалось улучшить палету — попробуй ещё раз", show_alert=True)
 
 
 @router.callback_query(F.data.startswith("market:sell:"))
@@ -136,11 +212,12 @@ async def market_sell(cb: CallbackQuery, state: FSMContext):
     if have < 1:
         return await cb.answer("Нечего продавать", show_alert=True)
 
-    free = SELL_LIMIT - await storage.active_listing_qty(tg_id)
-    if free <= 0:
-        return await cb.answer(f"Лимит: не больше {SELL_LIMIT} шт в продаже разом. "
-                               f"Дождись продажи лотов", show_alert=True)
-    max_sell = min(have, free)
+    sell_limit = await storage.market_sell_limit(tg_id)
+    free = max(0, sell_limit - await storage.active_listing_qty(tg_id))
+    # Продажа по минимальной цене мгновенна и не занимает палету. Поэтому
+    # даже с заполненной палетой даём дойти до выбора цены; delayed-лот
+    # перепроверяется уже после ввода цены.
+    max_sell = min(have, free) if free > 0 else have
     if max_sell == 1:
         return await _ask_price(cb, state, it, 1)
 
@@ -154,10 +231,14 @@ async def market_sell(cb: CallbackQuery, state: FSMContext):
     rows.append([InlineKeyboardButton(text=all_label,
                                       callback_data=f"market:qty:{key}:{max_sell}")])
     rows.append([InlineKeyboardButton(text="⬅️ К продаже", callback_data="market:sellmenu")])
+    pallet_note = (
+        "Палета заполнена: доступна только мгновенная продажа по минимальной цене.\n"
+        if free <= 0 else ""
+    )
     await _show(
         cb.message,
         f"{it.emoji} <b>{it.name}</b> (у тебя ×{have}, свободно в продаже {free})\n"
-        f"Сколько выставляем в лот?",
+        f"{pallet_note}Сколько выставляем в лот?",
         rows)
     await cb.answer()
 
@@ -174,8 +255,6 @@ async def market_qty(cb: CallbackQuery, state: FSMContext):
         return await cb.answer("Это не продаётся", show_alert=True)
     if qty < 1 or await storage.get_item_qty(tg_id, key) < qty:
         return await cb.answer("Столько уже нет", show_alert=True)
-    if qty > SELL_LIMIT - await storage.active_listing_qty(tg_id):
-        return await cb.answer(f"Лимит {SELL_LIMIT} шт в продаже разом", show_alert=True)
     await _ask_price(cb, state, it, qty)
 
 
@@ -219,15 +298,13 @@ async def market_price(msg: Message, state: FSMContext, bot: Bot):
     price = int(raw)
     if price < it.sell_min or price > it.sell_max:
         return await finish(f"❌ Цена должна быть {it.sell_min}–{it.sell_max} Z — отменено.")
-    if qty > SELL_LIMIT - await storage.active_listing_qty(tg_id):
-        return await finish(f"❌ Лимит {SELL_LIMIT} шт в продаже разом — отменено.")
-    if not await storage.remove_item(tg_id, it.key, qty):
-        return await finish("❌ Столько предметов уже нет — отменено.")
-
     cnt = f" ×{qty}" if qty > 1 else ""
     total = price * qty
     minutes = (price - it.sell_min) * it.sell_minutes_per_z
     if minutes <= 0:
+        # Мгновенная продажа не занимает палету: предмет сразу уезжает в стакан.
+        if not await storage.remove_item(tg_id, it.key, qty):
+            return await finish("❌ Столько предметов уже нет — отменено.")
         await grant(bot, tg_id, total)  # продажа на рынке — легальна
         await storage.bump(tg_id, f"sold_{it.key}", qty)
         await storage.add_stock(it.key, buy_price(price), qty)  # уехало на прилавок
@@ -236,9 +313,16 @@ async def market_price(msg: Message, state: FSMContext, bot: Bot):
                             f"{it.name}{cnt} за {total} Z.\n{proletarian()}")
         return await finish(f"🏪 {it.emoji} {it.name}{cnt} продан моментально за <b>{total} Z</b>!")
 
-    # весь лот продаётся одновременно — один таймер на всех
+    # Весь лот продаётся одновременно — один таймер на всех. Снятие предмета
+    # и проверка свободного места палеты происходят в одной economy-транзакции.
     sell_at = (datetime.now() + timedelta(minutes=minutes)).isoformat()
-    await storage.add_listing(tg_id, it.key, price, sell_at, qty)
+    status = await storage.create_market_listing(tg_id, it.key, price, sell_at, qty)
+    if status == "no_item":
+        return await finish("❌ Столько предметов уже нет — отменено.")
+    if status == "limit":
+        return await finish(f"❌ Лимит {await storage.market_sell_limit(tg_id)} шт в продаже разом — отменено.")
+    if status != "ok":
+        return await finish("❌ Не удалось выставить лот — отменено.")
     await finish(
         f"🏪 {it.emoji} {it.name}{cnt} выставлен по <b>{price} Z/шт</b> (итого {total} Z).\n"
         f"Продадутся все разом через ~{minutes // 60}ч {minutes % 60}м. "

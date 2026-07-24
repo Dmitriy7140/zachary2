@@ -12,6 +12,7 @@ from content.items_fun import (bike_ride, bike_ride_chat, milk_drink, milk_drink
                                milk_shake_chat, rod_wave, rod_wave_chat)
 from content.phone import iphone_butt
 from content.shady import iphone_trash
+from content.slime_items import DRANIK_EAT_TEXT, eat_slime_pie, eat_slime_pita
 from content.zhmyzhko import corn_throw, egg_smash
 from db import storage
 from handlers.business import do_self_employ
@@ -39,6 +40,9 @@ ACTIONS = {
     "rod": [("wave", "🎣 Помахать удочкой")],
     "egg": [("smash", "🥚 Разбить себе об лоб")],
     "corn": [("throw", "🗑 Выкинуть")],
+    "slime_pie": [("eat", "🥚 Попробовать съесть")],
+    "slime_pita": [("eat", "🌽 Попробовать... съесть")],
+    "slime_dranik": [("eat", "🥔 Попробовать? Съесть?")],
 }
 
 
@@ -167,12 +171,60 @@ async def item_action(cb: CallbackQuery, bot: Bot):
             return await cb.answer("Кукурузы уже нет", show_alert=True)
         await announce(bot, corn_throw(_mention(cb)))
         await cb.answer("🌽 Выкинул. Деревня осуждает.", show_alert=True)
+    elif key == "slime_pie" and action == "eat":
+        status = await storage.consume_item_for_zbucks(tg_id, key)
+        if status != "ok":
+            return await cb.answer(_slime_food_failure(status), show_alert=True)
+        personal, thread = eat_slime_pie(_mention(cb))
+        delivered = await _send_personal_text(bot, tg_id, personal)
+        await announce(bot, thread)
+        if delivered:
+            await cb.answer()
+        else:
+            await cb.answer(personal, show_alert=True)
+    elif key == "slime_pita" and action == "eat":
+        status = await storage.consume_item_for_zbucks(tg_id, key)
+        if status != "ok":
+            return await cb.answer(_slime_food_failure(status), show_alert=True)
+        personal, thread = eat_slime_pita(_mention(cb))
+        delivered = await _send_personal_text(bot, tg_id, personal)
+        await announce(bot, thread)
+        if delivered:
+            await cb.answer()
+        else:
+            await cb.answer(personal, show_alert=True)
+    elif key == "slime_dranik" and action == "eat":
+        status = await storage.consume_item_for_zbucks(tg_id, key, cost=100)
+        if status != "ok":
+            return await cb.answer(_slime_food_failure(status, cost=100), show_alert=True)
+        if await _send_personal_text(bot, tg_id, DRANIK_EAT_TEXT):
+            await cb.answer()
+        else:
+            await cb.answer(DRANIK_EAT_TEXT, show_alert=True)
     else:
         await cb.answer()
 
 
 def _mention(cb: CallbackQuery) -> str:
     return hlink(cb.from_user.full_name, f"tg://user?id={cb.from_user.id}")
+
+
+def _slime_food_failure(status: str, cost: int = 0) -> str:
+    """Перевести атомарный результат списания в понятный игроку ответ."""
+    if status in {"no_item", "missing_item"}:
+        return "Этого изделия уже нет"
+    if cost and status in {"insufficient", "insufficient_zbucks", "no_money"}:
+        return f"Не хватает {cost} Z — слизням всё равно нужны твои бабки"
+    return "Не получилось это съесть — попробуй обновить инвентарь"
+
+
+async def _send_personal_text(bot: Bot, tg_id: int, text: str) -> bool:
+    """Личное сообщение — best effort; результат механики уже сохранён в SQLite."""
+    try:
+        await bot.send_message(tg_id, text)
+    except Exception:
+        return False
+    return True
 
 
 async def _iphone_butt(cb: CallbackQuery, bot: Bot, tg_id: int) -> None:

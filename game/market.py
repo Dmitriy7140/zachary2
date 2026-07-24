@@ -2,7 +2,8 @@
 
 Продажа = поставка на рынок: проданное падает в общий сток (market_stock)
 и продаётся другим игрокам с наценкой MARKUP_PCT. Лот продаётся ВЕСЬ разом
-по своему таймеру. Одновременно у игрока в продаже не больше SELL_LIMIT штук.
+по своему таймеру. Вместимость палеты определяет, сколько штук игрок может
+держать в продаже одновременно.
 """
 import asyncio
 import logging
@@ -20,7 +21,13 @@ from utils.notify import announce
 log = logging.getLogger(__name__)
 
 MARKUP_PCT = 10     # наценка рынка при перепродаже игрокам
-SELL_LIMIT = 20     # штук одновременно в продаже у одного игрока
+MARKET_PALLET_BASE_LIMIT = 20
+MARKET_PALLET_UPGRADED_LIMIT = 40
+MARKET_PALLET_UPGRADE_PRICE = 10_000
+
+# Старое публичное имя — базовая вместимость. Новые проверки должны брать
+# персональный лимит из storage.market_sell_limit().
+SELL_LIMIT = MARKET_PALLET_BASE_LIMIT
 
 
 def buy_price(sell_price: int) -> int:

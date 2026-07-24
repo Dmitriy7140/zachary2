@@ -17,6 +17,48 @@ LotteryPurchaseStatus = Literal[
     "ok", "duplicate", "closed", "insufficient", "no_profile"
 ]
 
+# Результаты новых атомарных операций экономики.  Строковые статусы намеренно
+# оставлены простыми: handlers могут безопасно сопоставить их с понятной
+# пользователю ошибкой, не разбирая исключения SQLite.
+BusinessPurchaseStatus = Literal[
+    "ok", "already_owned", "no_profile", "not_self_employed", "insufficient_funds"
+]
+BusinessUpgradeStatus = Literal[
+    "ok", "not_owned", "no_profile", "stale", "max_level", "insufficient_funds"
+]
+BusinessUpkeepStatus = Literal["paid", "unpaid", "not_due", "not_owned"]
+LaunderingStartStatus = Literal[
+    "ok", "not_owned", "paused", "insufficient_dirty", "limit", "no_profile"
+]
+SlugCookingStartStatus = Literal[
+    "ok", "not_owned", "paused", "locked", "no_ingredients", "limit",
+    "inventory_full",
+]
+ItemSpendStatus = Literal["ok", "no_item", "insufficient"]
+MarketPalletUpgradeStatus = Literal[
+    "upgraded", "already_upgraded", "insufficient_funds", "no_profile"
+]
+MarketListingStatus = Literal["ok", "no_profile", "no_item", "limit"]
+
+
+@dataclass(frozen=True)
+class BusinessUpkeepSettlement:
+    """Результат одного атомарно обработанного ежедневного содержания."""
+
+    status: BusinessUpkeepStatus
+    was_paused: bool = False
+
+
+@dataclass(frozen=True)
+class LaunderingSettlement:
+    """Уже зафиксированное зачисление отмытой суммы для post-commit уведомлений."""
+
+    tg_id: int
+    biz: str
+    amount: int
+    balance_before: int
+    balance_after: int
+
 
 @dataclass(frozen=True)
 class LotteryRoundView:
@@ -122,6 +164,7 @@ async def init() -> None:
             username   TEXT,
             nick       TEXT UNIQUE,
             zbucks     INTEGER DEFAULT 0,
+            market_pallet_level INTEGER DEFAULT 0,
             created_at TEXT DEFAULT (datetime('now'))
         );
 
@@ -229,9 +272,27 @@ async def init() -> None:
         CREATE TABLE IF NOT EXISTS laundering (
             id       INTEGER PRIMARY KEY AUTOINCREMENT,
             tg_id    INTEGER,
+            biz      TEXT NOT NULL DEFAULT 'mosquito_farm',
             amount   INTEGER,
             ready_at TEXT
         );
+
+        -- Заказы слизней: каждая штука — отдельная durable-задача.  После
+        -- ready_at задача становится ready, а delivered сохраняется как
+        -- журнал, поэтому повторный тик не может выдать товар дважды.
+        CREATE TABLE IF NOT EXISTS slug_cooking (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            tg_id        INTEGER NOT NULL,
+            item         TEXT NOT NULL,
+            ready_at     TEXT NOT NULL,
+            status       TEXT NOT NULL DEFAULT 'cooking'
+                             CHECK (status IN ('cooking', 'ready', 'delivered')),
+            delivered_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS slug_cooking_due_idx
+            ON slug_cooking (status, ready_at);
+        CREATE INDEX IF NOT EXISTS slug_cooking_owner_idx
+            ON slug_cooking (tg_id, status, item, ready_at);
 
         -- рыночный сток («стакан»): всё, что продали игроки, лежит тут
         -- и продаётся другим с наценкой; price — уже цена ПОКУПКИ
@@ -252,8 +313,17 @@ async def init() -> None:
     await _ensure_column("profiles", "dirty", "INTEGER DEFAULT 0")
     # самозанятость (оформляется через Самсунг, нужна для покупки бизнеса)
     await _ensure_column("profiles", "self_employed", "INTEGER DEFAULT 0")
+    # рынок: обычная палета хранит 20 товаров, один апгрейд — 40
+    await _ensure_column("profiles", "market_pallet_level", "INTEGER DEFAULT 0")
     # рынок: лот может содержать несколько штук по одной цене
     await _ensure_column("market", "qty", "INTEGER DEFAULT 1")
+    # До введения нескольких компаний все закладки относились к комарам.
+    await _ensure_column(
+        "laundering", "biz", "TEXT NOT NULL DEFAULT 'mosquito_farm'"
+    )
+    await _db.execute(
+        "UPDATE laundering SET biz = 'mosquito_farm' WHERE biz IS NULL OR biz = ''"
+    )
     await _db.commit()
     await _init_lottery_schema()
 
@@ -610,25 +680,10 @@ async def spend_zbucks_traced(tg_id: int, amount: int) -> int | None:
         connection = _economy_connection()
         await connection.execute("BEGIN IMMEDIATE")
         try:
-            cur = await connection.execute(
-                "SELECT zbucks, dirty FROM profiles WHERE tg_id = ?", (tg_id,)
-            )
-            row = await cur.fetchone()
-            if not row:
+            dirty_spend = await _spend_zbucks_on(connection, tg_id, amount)
+            if dirty_spend is None:
                 await connection.rollback()
                 return None
-            balance, dirty = row[0], row[1] or 0
-            hidden = await _hidden_amount_on(connection, tg_id, datetime.now())
-            if balance - hidden < amount:
-                await connection.rollback()
-                return None
-            dirty_spend = min(amount, max(0, dirty - hidden))
-            await connection.execute(
-                """UPDATE profiles
-                   SET zbucks = zbucks - ?, dirty = dirty - ?
-                   WHERE tg_id = ?""",
-                (amount, dirty_spend, tg_id),
-            )
             await connection.commit()
             return dirty_spend
         except BaseException:
@@ -640,6 +695,40 @@ def _economy_connection() -> aiosqlite.Connection:
     if _economy_db is None:
         raise RuntimeError("storage.init() must be called first")
     return _economy_db
+
+
+async def _spend_zbucks_on(
+    connection: aiosqlite.Connection,
+    tg_id: int,
+    amount: int,
+    at: datetime | None = None,
+) -> int | None:
+    """Списать деньги внутри уже открытой economy-транзакции.
+
+    Возвращает грязную часть списания или ``None``, не меняя БД, если
+    профиля/доступных денег нет.  Спрятанные деньги остаются недоступными, а
+    грязные, как и в :func:`spend_zbucks_traced`, расходуются первыми.
+    """
+    if amount < 0:
+        raise ValueError("amount must be non-negative")
+    cur = await connection.execute(
+        "SELECT zbucks, dirty FROM profiles WHERE tg_id = ?", (tg_id,)
+    )
+    row = await cur.fetchone()
+    if not row:
+        return None
+    balance, dirty = row[0], row[1] or 0
+    hidden = await _hidden_amount_on(connection, tg_id, at or datetime.now())
+    if balance - hidden < amount:
+        return None
+    dirty_spend = min(amount, max(0, dirty - hidden))
+    await connection.execute(
+        """UPDATE profiles
+           SET zbucks = zbucks - ?, dirty = dirty - ?
+           WHERE tg_id = ?""",
+        (amount, dirty_spend, tg_id),
+    )
+    return dirty_spend
 
 
 async def spend_zbucks(tg_id: int, amount: int) -> bool:
@@ -685,35 +774,112 @@ async def get_inventory(tg_id: int) -> dict[str, int]:
 
 
 async def add_item(tg_id: int, item: str, qty: int = 1, max_qty: int | None = None) -> int:
-    """Добавить предмет (с потолком max_qty). Вернуть новое количество."""
-    new = await get_item_qty(tg_id, item) + qty
-    if max_qty is not None:
-        new = min(new, max_qty)
-    await _db.execute(
-        """
-        INSERT INTO inventory (tg_id, item, qty) VALUES (?, ?, ?)
-        ON CONFLICT (tg_id, item) DO UPDATE SET qty = excluded.qty
-        """,
-        (tg_id, item, new),
-    )
-    await _db.commit()
-    return new
+    """Добавить предмет (с потолком max_qty) и вернуть новое количество.
+
+    Выдачи бизнеса/рыбалки используют тот же economy-lock, что и готовка
+    слизней: иначе старое read-check-write могло бы перезаписать уже
+    зафиксированную выдачу готового изделия.
+    """
+    async with _economy_lock:
+        connection = _economy_connection()
+        await connection.execute("BEGIN IMMEDIATE")
+        try:
+            cur = await connection.execute(
+                "SELECT qty FROM inventory WHERE tg_id = ? AND item = ?", (tg_id, item)
+            )
+            row = await cur.fetchone()
+            new = (row[0] if row else 0) + qty
+            if max_qty is not None:
+                new = min(new, max_qty)
+            await connection.execute(
+                """INSERT INTO inventory (tg_id, item, qty) VALUES (?, ?, ?)
+                   ON CONFLICT (tg_id, item) DO UPDATE SET qty = excluded.qty""",
+                (tg_id, item, new),
+            )
+            await connection.commit()
+            return new
+        except BaseException:
+            await connection.rollback()
+            raise
 
 
 async def remove_item(tg_id: int, item: str, qty: int = 1) -> bool:
     """Снять qty предметов. False, если столько нет."""
-    have = await get_item_qty(tg_id, item)
-    if have < qty:
-        return False
-    new = have - qty
-    if new <= 0:
-        await _db.execute("DELETE FROM inventory WHERE tg_id = ? AND item = ?", (tg_id, item))
-    else:
-        await _db.execute(
-            "UPDATE inventory SET qty = ? WHERE tg_id = ? AND item = ?", (new, tg_id, item)
-        )
-    await _db.commit()
-    return True
+    return await consume_item(tg_id, item, qty)
+
+
+async def consume_item(tg_id: int, item: str, qty: int = 1) -> bool:
+    """Атомарно потратить предметы; False, если их уже не хватает.
+
+    В отличие от старого ``remove_item`` это одна writer-транзакция, поэтому
+    два callback-а не смогут съесть одну и ту же единицу инвентаря.
+    """
+    if qty <= 0:
+        raise ValueError("qty must be positive")
+    async with _economy_lock:
+        connection = _economy_connection()
+        await connection.execute("BEGIN IMMEDIATE")
+        try:
+            cur = await connection.execute(
+                """UPDATE inventory SET qty = qty - ?
+                   WHERE tg_id = ? AND item = ? AND qty >= ?""",
+                (qty, tg_id, item, qty),
+            )
+            if cur.rowcount != 1:
+                await connection.rollback()
+                return False
+            await connection.execute(
+                "DELETE FROM inventory WHERE tg_id = ? AND item = ? AND qty <= 0",
+                (tg_id, item),
+            )
+            await connection.commit()
+            return True
+        except BaseException:
+            await connection.rollback()
+            raise
+
+
+async def consume_item_for_zbucks(
+    tg_id: int, item: str, cost: int = 0, qty: int = 1
+) -> ItemSpendStatus:
+    """Атомарно потратить предмет и Zbucks.
+
+    Возвращает ``ok``, ``no_item`` или ``insufficient``.  При любом
+    неуспехе не меняется ни инвентарь, ни баланс; списание денег соблюдает
+    обычные правила грязных и спрятанных Zbucks.
+    """
+    if cost < 0:
+        raise ValueError("cost must be non-negative")
+    if qty <= 0:
+        raise ValueError("qty must be positive")
+    async with _economy_lock:
+        connection = _economy_connection()
+        await connection.execute("BEGIN IMMEDIATE")
+        try:
+            cur = await connection.execute(
+                "SELECT qty FROM inventory WHERE tg_id = ? AND item = ?",
+                (tg_id, item),
+            )
+            row = await cur.fetchone()
+            if not row or row[0] < qty:
+                await connection.rollback()
+                return "no_item"
+            if cost and await _spend_zbucks_on(connection, tg_id, cost) is None:
+                await connection.rollback()
+                return "insufficient"
+            await connection.execute(
+                "UPDATE inventory SET qty = qty - ? WHERE tg_id = ? AND item = ?",
+                (qty, tg_id, item),
+            )
+            await connection.execute(
+                "DELETE FROM inventory WHERE tg_id = ? AND item = ? AND qty <= 0",
+                (tg_id, item),
+            )
+            await connection.commit()
+            return "ok"
+        except BaseException:
+            await connection.rollback()
+            raise
 
 
 # --- глобальная 24-часовая лотерея ---
@@ -1472,11 +1638,126 @@ async def remove_listing(listing_id: int) -> None:
 
 
 async def active_listing_qty(tg_id: int) -> int:
-    """Сколько штук у игрока сейчас в активной продаже (лимит 20)."""
+    """Сколько штук у игрока сейчас в активной продаже."""
     cur = await _db.execute(
         "SELECT COALESCE(SUM(qty), 0) FROM market WHERE tg_id = ?", (tg_id,)
     )
     return (await cur.fetchone())[0]
+
+
+MARKET_PALLET_BASE_LIMIT = 20
+MARKET_PALLET_UPGRADED_LIMIT = 40
+
+
+async def get_market_pallet_level(tg_id: int) -> int:
+    """Вернуть сохранённый уровень палеты (0 — обычная, 1 — расширенная)."""
+    cur = await _db.execute(
+        "SELECT market_pallet_level FROM profiles WHERE tg_id = ?", (tg_id,)
+    )
+    row = await cur.fetchone()
+    return max(0, int(row[0] or 0)) if row else 0
+
+
+async def market_sell_limit(tg_id: int) -> int:
+    """Текущая вместимость палеты игрока: 20 или 40 товаров."""
+    return (
+        MARKET_PALLET_UPGRADED_LIMIT
+        if await get_market_pallet_level(tg_id) >= 1
+        else MARKET_PALLET_BASE_LIMIT
+    )
+
+
+async def upgrade_market_pallet(
+    tg_id: int, price: int = 10_000
+) -> MarketPalletUpgradeStatus:
+    """Атомарно купить одноразовое расширение палеты.
+
+    Статусы: ``upgraded``, ``already_upgraded``, ``insufficient_funds`` и
+    ``no_profile``.  Стоимость списывается с учётом спрятанных/грязных денег.
+    """
+    if price < 0:
+        raise ValueError("price must be non-negative")
+    async with _economy_lock:
+        connection = _economy_connection()
+        await connection.execute("BEGIN IMMEDIATE")
+        try:
+            cur = await connection.execute(
+                "SELECT market_pallet_level FROM profiles WHERE tg_id = ?", (tg_id,)
+            )
+            row = await cur.fetchone()
+            if not row:
+                await connection.rollback()
+                return "no_profile"
+            if (row[0] or 0) >= 1:
+                await connection.rollback()
+                return "already_upgraded"
+            if await _spend_zbucks_on(connection, tg_id, price) is None:
+                await connection.rollback()
+                return "insufficient_funds"
+            await connection.execute(
+                "UPDATE profiles SET market_pallet_level = 1 WHERE tg_id = ?", (tg_id,)
+            )
+            await connection.commit()
+            return "upgraded"
+        except BaseException:
+            await connection.rollback()
+            raise
+
+
+async def create_market_listing(
+    tg_id: int, item: str, price: int, sell_at: str, qty: int = 1
+) -> MarketListingStatus:
+    """Атомарно снять товар из инвентаря и поставить его на палету.
+
+    Проверяет динамический лимит палеты внутри той же transaction.  Это
+    защищает последний свободный слот от двух одновременных callback-ов.
+    """
+    if qty <= 0:
+        raise ValueError("qty must be positive")
+    async with _economy_lock:
+        connection = _economy_connection()
+        await connection.execute("BEGIN IMMEDIATE")
+        try:
+            cur = await connection.execute(
+                "SELECT market_pallet_level FROM profiles WHERE tg_id = ?", (tg_id,)
+            )
+            profile = await cur.fetchone()
+            if not profile:
+                await connection.rollback()
+                return "no_profile"
+            cur = await connection.execute(
+                "SELECT COALESCE(SUM(qty), 0) FROM market WHERE tg_id = ?", (tg_id,)
+            )
+            in_sale = (await cur.fetchone())[0]
+            limit = (
+                MARKET_PALLET_UPGRADED_LIMIT
+                if (profile[0] or 0) >= 1
+                else MARKET_PALLET_BASE_LIMIT
+            )
+            if in_sale + qty > limit:
+                await connection.rollback()
+                return "limit"
+            cur = await connection.execute(
+                """UPDATE inventory SET qty = qty - ?
+                   WHERE tg_id = ? AND item = ? AND qty >= ?""",
+                (qty, tg_id, item, qty),
+            )
+            if cur.rowcount != 1:
+                await connection.rollback()
+                return "no_item"
+            await connection.execute(
+                "DELETE FROM inventory WHERE tg_id = ? AND item = ? AND qty <= 0",
+                (tg_id, item),
+            )
+            await connection.execute(
+                "INSERT INTO market (tg_id, item, price, sell_at, qty) VALUES (?, ?, ?, ?, ?)",
+                (tg_id, item, price, sell_at, qty),
+            )
+            await connection.commit()
+            return "ok"
+        except BaseException:
+            await connection.rollback()
+            raise
 
 
 # --- рыночный сток («стакан» покупки) ---
@@ -1864,6 +2145,124 @@ async def self_employed_ids() -> list[int]:
     return [r[0] for r in await cur.fetchall()]
 
 
+async def list_businesses(tg_id: int) -> list[tuple]:
+    """Компании игрока: ``(biz, tier, level, custom_name, paused)``."""
+    cur = await _db.execute(
+        """SELECT biz, tier, level, custom_name, paused FROM businesses
+           WHERE tg_id = ? ORDER BY bought_at, biz""",
+        (tg_id,),
+    )
+    return await cur.fetchall()
+
+
+async def buy_business_atomic(
+    tg_id: int,
+    biz: str,
+    tier: str,
+    price: int,
+    produce_at: str | None,
+    upkeep_at: str | None,
+    *,
+    require_self_employed: bool = True,
+) -> BusinessPurchaseStatus:
+    """Купить компанию и списать деньги в одной economy-транзакции.
+
+    ``produce_at`` может быть ``None`` для бизнеса, чья продукция выдаётся
+    отдельной очередью.  Возвращает ``ok``, ``already_owned``, ``no_profile``,
+    ``not_self_employed`` или ``insufficient_funds``.
+    """
+    if price < 0:
+        raise ValueError("price must be non-negative")
+    async with _economy_lock:
+        connection = _economy_connection()
+        await connection.execute("BEGIN IMMEDIATE")
+        try:
+            cur = await connection.execute(
+                "SELECT self_employed FROM profiles WHERE tg_id = ?", (tg_id,)
+            )
+            profile = await cur.fetchone()
+            if not profile:
+                await connection.rollback()
+                return "no_profile"
+            cur = await connection.execute(
+                "SELECT 1 FROM businesses WHERE tg_id = ? AND biz = ?", (tg_id, biz)
+            )
+            if await cur.fetchone():
+                await connection.rollback()
+                return "already_owned"
+            if require_self_employed and not profile[0]:
+                await connection.rollback()
+                return "not_self_employed"
+            if await _spend_zbucks_on(connection, tg_id, price) is None:
+                await connection.rollback()
+                return "insufficient_funds"
+            await connection.execute(
+                """INSERT INTO businesses
+                   (tg_id, biz, tier, produce_at, upkeep_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (tg_id, biz, tier, produce_at, upkeep_at),
+            )
+            await connection.commit()
+            return "ok"
+        except BaseException:
+            await connection.rollback()
+            raise
+
+
+async def upgrade_business_atomic(
+    tg_id: int, biz: str, expected_level: int, price: int
+) -> BusinessUpgradeStatus:
+    """Атомарно оплатить и повысить бизнес на один уровень.
+
+    ``expected_level`` защищает подтверждение от stale/double click: если
+    уровень уже изменился, возвращается ``stale`` без повторного списания.
+    """
+    if expected_level < 1:
+        raise ValueError("expected_level must be positive")
+    if price < 0:
+        raise ValueError("price must be non-negative")
+    async with _economy_lock:
+        connection = _economy_connection()
+        await connection.execute("BEGIN IMMEDIATE")
+        try:
+            cur = await connection.execute(
+                "SELECT 1 FROM profiles WHERE tg_id = ?", (tg_id,)
+            )
+            if not await cur.fetchone():
+                await connection.rollback()
+                return "no_profile"
+            cur = await connection.execute(
+                "SELECT level FROM businesses WHERE tg_id = ? AND biz = ?",
+                (tg_id, biz),
+            )
+            business = await cur.fetchone()
+            if not business:
+                await connection.rollback()
+                return "not_owned"
+            if business[0] != expected_level:
+                await connection.rollback()
+                return "stale"
+            if business[0] >= 3:
+                await connection.rollback()
+                return "max_level"
+            if await _spend_zbucks_on(connection, tg_id, price) is None:
+                await connection.rollback()
+                return "insufficient_funds"
+            cur = await connection.execute(
+                """UPDATE businesses SET level = level + 1
+                   WHERE tg_id = ? AND biz = ? AND level = ?""",
+                (tg_id, biz, expected_level),
+            )
+            if cur.rowcount != 1:
+                await connection.rollback()
+                return "stale"
+            await connection.commit()
+            return "ok"
+        except BaseException:
+            await connection.rollback()
+            raise
+
+
 async def create_business(tg_id: int, biz: str, tier: str,
                           produce_at: str, upkeep_at: str) -> bool:
     """Создать бизнес. False — такой у игрока уже есть."""
@@ -1946,30 +2345,189 @@ async def set_upkeep_at(tg_id: int, biz: str, next_iso: str) -> None:
     await _db.commit()
 
 
+async def settle_business_upkeep_atomic(
+    tg_id: int,
+    biz: str,
+    amount: int,
+    now_iso: str,
+    next_upkeep_at: str,
+    resume_produce_at: str | None = None,
+) -> BusinessUpkeepSettlement:
+    """Атомарно списать ежедневное содержание или поставить бизнес на паузу.
+
+    Повторный scheduler или клик не сможет списать одну зарплату дважды:
+    внутри одной writer-транзакции повторно проверяются срок, баланс, новая
+    дата платежа и флаг паузы.  Если бизнес был приостановлен и успешно
+    оплатился, ``resume_produce_at`` перезапускает его старое производство.
+    """
+    if amount <= 0:
+        raise ValueError("amount must be positive")
+    async with _economy_lock:
+        connection = _economy_connection()
+        await connection.execute("BEGIN IMMEDIATE")
+        try:
+            cur = await connection.execute(
+                """SELECT paused, upkeep_at FROM businesses
+                   WHERE tg_id = ? AND biz = ?""",
+                (tg_id, biz),
+            )
+            business = await cur.fetchone()
+            if not business:
+                await connection.rollback()
+                return BusinessUpkeepSettlement("not_owned")
+            was_paused = bool(business[0])
+            due_at = business[1]
+            if due_at is None or due_at > now_iso:
+                await connection.rollback()
+                return BusinessUpkeepSettlement("not_due", was_paused)
+
+            paid = await _spend_zbucks_on(connection, tg_id, amount) is not None
+            if paid:
+                if was_paused and resume_produce_at is not None:
+                    await connection.execute(
+                        """UPDATE businesses
+                           SET upkeep_at = ?, paused = 0, produce_at = ?
+                           WHERE tg_id = ? AND biz = ?""",
+                        (next_upkeep_at, resume_produce_at, tg_id, biz),
+                    )
+                else:
+                    await connection.execute(
+                        """UPDATE businesses SET upkeep_at = ?, paused = 0
+                           WHERE tg_id = ? AND biz = ?""",
+                        (next_upkeep_at, tg_id, biz),
+                    )
+                await connection.commit()
+                return BusinessUpkeepSettlement("paid", was_paused)
+
+            await connection.execute(
+                """UPDATE businesses SET upkeep_at = ?, paused = 1
+                   WHERE tg_id = ? AND biz = ?""",
+                (next_upkeep_at, tg_id, biz),
+            )
+            await connection.commit()
+            return BusinessUpkeepSettlement("unpaid", was_paused)
+        except BaseException:
+            await connection.rollback()
+            raise
+
+
 # --- отмыв грязных денег ---
 
-async def add_laundering(tg_id: int, amount: int, ready_at: str) -> None:
+async def add_laundering(
+    tg_id: int, amount: int, ready_at: str, biz: str = "mosquito_farm"
+) -> None:
+    """Совместимый неатомарный helper для старых callers.
+
+    Новый код должен использовать :func:`start_laundering_atomic`, чтобы
+    проверка бизнеса, лимита и списание денег были одной операцией.
+    """
     await _db.execute(
-        "INSERT INTO laundering (tg_id, amount, ready_at) VALUES (?, ?, ?)",
-        (tg_id, amount, ready_at),
+        "INSERT INTO laundering (tg_id, biz, amount, ready_at) VALUES (?, ?, ?, ?)",
+        (tg_id, biz, amount, ready_at),
     )
     await _db.commit()
 
 
-async def laundering_active_sum(tg_id: int) -> int:
-    """Сколько Z сейчас в стирке у игрока."""
-    cur = await _db.execute(
-        "SELECT COALESCE(SUM(amount), 0) FROM laundering WHERE tg_id = ?", (tg_id,)
-    )
+async def laundering_active_sum(tg_id: int, biz: str | None = None) -> int:
+    """Сколько Z сейчас в стирке (всей или выбранной компании)."""
+    if biz is None:
+        cur = await _db.execute(
+            "SELECT COALESCE(SUM(amount), 0) FROM laundering WHERE tg_id = ?", (tg_id,)
+        )
+    else:
+        cur = await _db.execute(
+            """SELECT COALESCE(SUM(amount), 0) FROM laundering
+               WHERE tg_id = ? AND biz = ?""",
+            (tg_id, biz),
+        )
     return (await cur.fetchone())[0]
 
 
-async def get_launderings(tg_id: int) -> list[tuple]:
-    """Активные закладки игрока: (amount, ready_at)."""
-    cur = await _db.execute(
-        "SELECT amount, ready_at FROM laundering WHERE tg_id = ? ORDER BY ready_at", (tg_id,)
-    )
+async def get_launderings(tg_id: int, biz: str | None = None) -> list[tuple]:
+    """Активные закладки: ``(amount, ready_at)``; без biz — все компании."""
+    if biz is None:
+        cur = await _db.execute(
+            "SELECT amount, ready_at FROM laundering WHERE tg_id = ? ORDER BY ready_at",
+            (tg_id,),
+        )
+    else:
+        cur = await _db.execute(
+            """SELECT amount, ready_at FROM laundering
+               WHERE tg_id = ? AND biz = ? ORDER BY ready_at""",
+            (tg_id, biz),
+        )
     return await cur.fetchall()
+
+
+async def list_launderings(tg_id: int, biz: str) -> list[tuple]:
+    """Явный business-scoped alias: ``(amount, ready_at)``."""
+    return await get_launderings(tg_id, biz)
+
+
+async def start_laundering_atomic(
+    tg_id: int, biz: str, amount: int, ready_at: str, cap: int
+) -> LaunderingStartStatus:
+    """Атомарно положить доступные грязные деньги в отмыв компании.
+
+    ``cap`` — лимит выбранного уровня бизнеса.  Возвращает ``ok``,
+    ``not_owned``, ``paused``, ``insufficient_dirty``, ``limit`` или
+    ``no_profile``; при неуспехе не меняются ни баланс, ни очередь.
+    """
+    if amount <= 0:
+        raise ValueError("amount must be positive")
+    if cap < 0:
+        raise ValueError("cap must be non-negative")
+    async with _economy_lock:
+        connection = _economy_connection()
+        await connection.execute("BEGIN IMMEDIATE")
+        try:
+            cur = await connection.execute(
+                "SELECT zbucks, dirty FROM profiles WHERE tg_id = ?", (tg_id,)
+            )
+            profile = await cur.fetchone()
+            if not profile:
+                await connection.rollback()
+                return "no_profile"
+            cur = await connection.execute(
+                "SELECT paused FROM businesses WHERE tg_id = ? AND biz = ?",
+                (tg_id, biz),
+            )
+            business = await cur.fetchone()
+            if not business:
+                await connection.rollback()
+                return "not_owned"
+            if business[0]:
+                await connection.rollback()
+                return "paused"
+            cur = await connection.execute(
+                """SELECT COALESCE(SUM(amount), 0) FROM laundering
+                   WHERE tg_id = ? AND biz = ?""",
+                (tg_id, biz),
+            )
+            in_wash = (await cur.fetchone())[0]
+            if in_wash + amount > cap:
+                await connection.rollback()
+                return "limit"
+            hidden = await _hidden_amount_on(connection, tg_id, datetime.now())
+            balance, dirty = profile[0], profile[1] or 0
+            if amount > balance - hidden or amount > max(0, dirty - hidden):
+                await connection.rollback()
+                return "insufficient_dirty"
+            dirty_spend = await _spend_zbucks_on(connection, tg_id, amount)
+            # Проверка выше означает, что вся сумма обязана быть грязной.
+            if dirty_spend != amount:
+                await connection.rollback()
+                return "insufficient_dirty"
+            await connection.execute(
+                """INSERT INTO laundering (tg_id, biz, amount, ready_at)
+                   VALUES (?, ?, ?, ?)""",
+                (tg_id, biz, amount, ready_at),
+            )
+            await connection.commit()
+            return "ok"
+        except BaseException:
+            await connection.rollback()
+            raise
 
 
 async def due_laundering(now_iso: str) -> list[tuple]:
@@ -1983,6 +2541,239 @@ async def due_laundering(now_iso: str) -> list[tuple]:
 async def remove_laundering(lid: int) -> None:
     await _db.execute("DELETE FROM laundering WHERE id = ?", (lid,))
     await _db.commit()
+
+
+async def settle_due_laundering_details(now_iso: str) -> list[LaunderingSettlement]:
+    """Атомарно выдать закладки с балансами для post-commit налоговой проверки.
+
+    Деньги уже начислены, а строки удалены до возврата результата.  Снимки
+    баланса позволяют scheduler-у вызвать ``maybe_gustav`` без повторного
+    зачисления дохода и без потери пороговой логики обычного ``grant()``.
+    """
+    async with _economy_lock:
+        connection = _economy_connection()
+        await connection.execute("BEGIN IMMEDIATE")
+        try:
+            cur = await connection.execute(
+                """SELECT l.id, l.tg_id, l.biz, l.amount, p.zbucks
+                   FROM laundering l
+                   JOIN profiles p ON p.tg_id = l.tg_id
+                   WHERE l.ready_at <= ? AND l.amount > 0
+                   ORDER BY l.ready_at, l.id""",
+                (now_iso,),
+            )
+            due = await cur.fetchall()
+            settlements: list[LaunderingSettlement] = []
+            running_balances: dict[int, int] = {}
+            for lid, tg_id, biz, amount, stored_balance in due:
+                # Один игрок может забрать несколько закладок в одном тике.
+                # SELECT снимал баланс до всех обновлений, поэтому для
+                # maybe_gustav строим последовательные old/new-снимки.
+                balance_before = running_balances.get(tg_id, stored_balance)
+                balance_after = balance_before + amount
+                await connection.execute(
+                    "UPDATE profiles SET zbucks = zbucks + ? WHERE tg_id = ?",
+                    (amount, tg_id),
+                )
+                await connection.execute("DELETE FROM laundering WHERE id = ?", (lid,))
+                settlements.append(LaunderingSettlement(
+                    tg_id=tg_id,
+                    biz=biz,
+                    amount=amount,
+                    balance_before=balance_before,
+                    balance_after=balance_after,
+                ))
+                running_balances[tg_id] = balance_after
+            await connection.commit()
+            return settlements
+        except BaseException:
+            await connection.rollback()
+            raise
+
+
+async def settle_due_laundering(now_iso: str) -> list[tuple]:
+    """Совместимый вид завершённых закладок: ``(tg_id, biz, amount)``."""
+    settlements = await settle_due_laundering_details(now_iso)
+    return [(entry.tg_id, entry.biz, entry.amount) for entry in settlements]
+
+
+# --- производство «Пирогов слизней» ---
+
+async def list_slug_cooks(tg_id: int) -> list[tuple]:
+    """Незавершённые заказы слизней: ``(item, ready_at, status)``."""
+    cur = await _db.execute(
+        """SELECT item, ready_at, status FROM slug_cooking
+           WHERE tg_id = ? AND status IN ('cooking', 'ready')
+           ORDER BY ready_at, id""",
+        (tg_id,),
+    )
+    return await cur.fetchall()
+
+
+async def start_slug_cooking_atomic(
+    tg_id: int,
+    item: str,
+    ingredient: str,
+    ingredient_qty: int,
+    min_level: int,
+    amount: int,
+    ready_at: str,
+    biz: str = "slug_bistro",
+    *,
+    max_active: int = 5,
+    max_inventory: int = 99,
+) -> SlugCookingStartStatus:
+    """Атомарно поставить поштучные заказы слизней в приготовление.
+
+    Очередь ограничена ``max_active`` незавершёнными единицами (``cooking``
+    и ожидающими свободного места ``ready``) по всем рецептам.  ``inventory
+    + готовые/готовящиеся заказы`` не может превысить ``max_inventory`` для
+    одного вида блюда, так что полная сумка не превратится в неограниченный
+    склад готовых, но невыданных заказов.
+    """
+    if ingredient_qty <= 0:
+        raise ValueError("ingredient_qty must be positive")
+    if min_level < 1:
+        raise ValueError("min_level must be positive")
+    if amount <= 0:
+        raise ValueError("amount must be positive")
+    if max_active <= 0 or max_inventory <= 0:
+        raise ValueError("limits must be positive")
+    async with _economy_lock:
+        connection = _economy_connection()
+        await connection.execute("BEGIN IMMEDIATE")
+        try:
+            cur = await connection.execute(
+                "SELECT level, paused FROM businesses WHERE tg_id = ? AND biz = ?",
+                (tg_id, biz),
+            )
+            business = await cur.fetchone()
+            if not business:
+                await connection.rollback()
+                return "not_owned"
+            level, paused = business
+            if paused:
+                await connection.rollback()
+                return "paused"
+            if level < min_level:
+                await connection.rollback()
+                return "locked"
+            cur = await connection.execute(
+                """SELECT COUNT(*) FROM slug_cooking
+                   WHERE tg_id = ? AND status IN ('cooking', 'ready')""",
+                (tg_id,),
+            )
+            active = (await cur.fetchone())[0]
+            if active + amount > max_active:
+                await connection.rollback()
+                return "limit"
+            cur = await connection.execute(
+                "SELECT qty FROM inventory WHERE tg_id = ? AND item = ?",
+                (tg_id, item),
+            )
+            inventory = await cur.fetchone()
+            current_qty = inventory[0] if inventory else 0
+            cur = await connection.execute(
+                """SELECT COUNT(*) FROM slug_cooking
+                   WHERE tg_id = ? AND item = ? AND status IN ('cooking', 'ready')""",
+                (tg_id, item),
+            )
+            queued = (await cur.fetchone())[0]
+            if current_qty + queued + amount > max_inventory:
+                await connection.rollback()
+                return "inventory_full"
+            needed = ingredient_qty * amount
+            cur = await connection.execute(
+                """UPDATE inventory SET qty = qty - ?
+                   WHERE tg_id = ? AND item = ? AND qty >= ?""",
+                (needed, tg_id, ingredient, needed),
+            )
+            if cur.rowcount != 1:
+                await connection.rollback()
+                return "no_ingredients"
+            await connection.execute(
+                "DELETE FROM inventory WHERE tg_id = ? AND item = ? AND qty <= 0",
+                (tg_id, ingredient),
+            )
+            await connection.executemany(
+                """INSERT INTO slug_cooking (tg_id, item, ready_at, status)
+                   VALUES (?, ?, ?, 'cooking')""",
+                [(tg_id, item, ready_at) for _ in range(amount)],
+            )
+            await connection.commit()
+            return "ok"
+        except BaseException:
+            await connection.rollback()
+            raise
+
+
+async def settle_due_slug_cooks(now_iso: str) -> list[tuple]:
+    """Перевести созревшие заказы в инвентарь без двойной выдачи.
+
+    Возвращает агрегаты ``(tg_id, item, count)`` после успешного commit.
+    Заказы, которым временно не хватает места из-за внешнего изменения
+    инвентаря, остаются ``ready`` и будут безопасно повторены следующим тиком.
+    """
+    async with _economy_lock:
+        connection = _economy_connection()
+        await connection.execute("BEGIN IMMEDIATE")
+        try:
+            await connection.execute(
+                """UPDATE slug_cooking SET status = 'ready'
+                   WHERE status = 'cooking' AND ready_at <= ?""",
+                (now_iso,),
+            )
+            cur = await connection.execute(
+                """SELECT tg_id, item FROM slug_cooking
+                   WHERE status = 'ready'
+                   GROUP BY tg_id, item
+                   ORDER BY tg_id, item"""
+            )
+            groups = await cur.fetchall()
+            delivered: list[tuple] = []
+            for tg_id, item in groups:
+                cur = await connection.execute(
+                    "SELECT qty FROM inventory WHERE tg_id = ? AND item = ?",
+                    (tg_id, item),
+                )
+                row = await cur.fetchone()
+                current_qty = row[0] if row else 0
+                capacity = max(0, 99 - current_qty)
+                if capacity <= 0:
+                    continue
+                cur = await connection.execute(
+                    """SELECT id FROM slug_cooking
+                       WHERE tg_id = ? AND item = ? AND status = 'ready'
+                       ORDER BY ready_at, id LIMIT ?""",
+                    (tg_id, item, capacity),
+                )
+                ids = [row[0] for row in await cur.fetchall()]
+                if not ids:
+                    continue
+                count = len(ids)
+                await connection.execute(
+                    """INSERT INTO inventory (tg_id, item, qty) VALUES (?, ?, ?)
+                       ON CONFLICT (tg_id, item)
+                       DO UPDATE SET qty = inventory.qty + excluded.qty""",
+                    (tg_id, item, count),
+                )
+                placeholders = ", ".join("?" for _ in ids)
+                cur = await connection.execute(
+                    f"""UPDATE slug_cooking
+                        SET status = 'delivered', delivered_at = ?
+                        WHERE status = 'ready' AND id IN ({placeholders})""",
+                    (now_iso, *ids),
+                )
+                # ids were read under BEGIN IMMEDIATE; this assertion keeps
+                # the returned notification aggregate tied to actual delivery.
+                if cur.rowcount != count:
+                    raise RuntimeError("slug cooking settlement lost claimed jobs")
+                delivered.append((tg_id, item, count))
+            await connection.commit()
+            return delivered
+        except BaseException:
+            await connection.rollback()
+            raise
 
 
 # --- воровство ---

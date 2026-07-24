@@ -51,6 +51,14 @@ ITEMS: dict[str, Item] = {
                  sell_min=30, sell_max=50, sell_minutes_per_z=10),
     "potato": Item("potato", "Картофель", "🥔", max_qty=99,
                    sell_min=40, sell_max=60, sell_minutes_per_z=10),
+    # глиняная «еда» из бистро слизней: купить в обычном магазине нельзя,
+    # зато особенно доверчивые капиталисты торгуют ею на рынке.
+    "slime_pie": Item("slime_pie", "«Пирожок» с яйцом", "🥚", max_qty=99,
+                      sell_min=200, sell_max=230, sell_minutes_per_z=10),
+    "slime_pita": Item("slime_pita", "«Пита» с кукурузой", "🌽", max_qty=99,
+                       sell_min=240, sell_max=270, sell_minutes_per_z=10),
+    "slime_dranik": Item("slime_dranik", "«Дранник» с картошкой", "🥔", max_qty=99,
+                         sell_min=270, sell_max=300, sell_minutes_per_z=10),
 }
 
 
