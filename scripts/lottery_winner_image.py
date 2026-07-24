@@ -9,7 +9,7 @@ import argparse
 import re
 from io import BytesIO
 from pathlib import Path
-from typing import Optional, Sequence, Tuple
+from typing import Optional, Sequence, Tuple, Union
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -43,15 +43,24 @@ LETTER_FILL = (35, 22, 73)
 LETTER_STROKE = (255, 254, 255)
 
 FONT_CANDIDATES = (
+    # Стандартные пути пакетов fonts-dejavu-core и fonts-ubuntu в Ubuntu 22.04+.
+    # Сначала пробуем жирные начертания, затем обычные.
+    Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
+    Path("/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed-Bold.ttf"),
+    Path("/usr/share/fonts/truetype/ubuntu/Ubuntu-B.ttf"),
     Path("/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf"),
     Path("/usr/share/fonts/opentype/noto/NotoSans-Bold.ttf"),
     Path("/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf"),
     Path("/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"),
     Path("/usr/share/fonts/truetype/freefont/FreeSansBold.ttf"),
+    Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+    Path("/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf"),
     Path("/Library/Fonts/YS Display-Bold.ttf"),
     Path("/System/Library/Fonts/Supplemental/Arial Bold.ttf"),
     Path("C:/Windows/Fonts/arialbd.ttf"),
 )
+
+FontType = Union[ImageFont.FreeTypeFont, ImageFont.ImageFont]
 
 
 def _validate_nickname(nickname: str) -> None:
@@ -65,8 +74,8 @@ def _validate_nickname(nickname: str) -> None:
         raise ValueError("Ник не должен содержать управляющие символы")
 
 
-def resolve_font_path(font_path: Optional[Path] = None) -> Path:
-    """Найти жирный шрифт с поддержкой латиницы и кириллицы."""
+def resolve_font_path(font_path: Optional[Path] = None) -> Optional[Path]:
+    """Найти системный шрифт или разрешить встроенный fallback Pillow."""
     if font_path is not None:
         candidate = Path(font_path).expanduser()
         if not candidate.is_file():
@@ -74,14 +83,37 @@ def resolve_font_path(font_path: Optional[Path] = None) -> Path:
         return candidate
 
     for candidate in FONT_CANDIDATES:
-        if candidate.is_file():
-            return candidate
+        if not candidate.is_file():
+            continue
+        try:
+            ImageFont.truetype(str(candidate), size=12)
+        except OSError:
+            continue
+        return candidate
 
-    variants = "\n".join(f"  - {candidate}" for candidate in FONT_CANDIDATES)
-    raise FileNotFoundError(
-        "Не найден жирный шрифт с кириллицей. Передай путь через --font. "
-        f"Проверенные варианты:\n{variants}"
-    )
+    # Pillow >= 10.1 содержит масштабируемый встроенный Aileron. На более
+    # старом Pillow load_default() всё равно даёт пригодный bitmap-fallback.
+    return None
+
+
+def _load_font(font_path: Optional[Path], size: int) -> FontType:
+    if font_path is not None:
+        return ImageFont.truetype(str(font_path), size=size)
+    try:
+        return ImageFont.load_default(size=size)
+    except TypeError:
+        # Параметр size появился в Pillow 10.1; requirements пока допускает
+        # 10.0, поэтому сохраняем рабочий последний fallback и для него.
+        return ImageFont.load_default()
+
+
+def _drawable_symbol(font: FontType, symbol: str) -> str:
+    """Заменить неподдерживаемый старым bitmap-font символ, не роняя рендер."""
+    try:
+        font.getmask(symbol)
+    except UnicodeError:
+        return "?"
+    return symbol
 
 
 def _expand_template(template: Image.Image, extra_slots: int) -> Image.Image:
@@ -128,20 +160,20 @@ def _slot_centers(symbol_count: int) -> Sequence[Tuple[int, int]]:
 
 
 def _fit_font(
-    font_path: Path,
+    font_path: Optional[Path],
     symbols: Sequence[str],
     *,
     preferred_size: int,
     max_width: int,
     max_height: int,
     stroke_width: int,
-) -> ImageFont.FreeTypeFont:
+) -> FontType:
     probe = ImageDraw.Draw(Image.new("L", (1, 1)))
 
-    def fits(symbol: str, font: ImageFont.FreeTypeFont) -> bool:
+    def fits(symbol: str, font: FontType) -> bool:
         box = probe.textbbox(
             (0, 0),
-            symbol,
+            _drawable_symbol(font, symbol),
             font=font,
             anchor="mm",
             stroke_width=stroke_width,
@@ -149,7 +181,7 @@ def _fit_font(
         return box[2] - box[0] <= max_width and box[3] - box[1] <= max_height
 
     for size in range(preferred_size, 11, -1):
-        font = ImageFont.truetype(str(font_path), size=size)
+        font = _load_font(font_path, size)
         if all(fits(symbol, font) for symbol in symbols):
             return font
     raise ValueError("Символы ника не помещаются внутрь шаров")
@@ -204,10 +236,11 @@ def render_winner_image(
         )
 
     for index, (symbol, center) in enumerate(zip(nickname, centers)):
+        font = large_font if index == 0 else small_font
         draw.text(
             center,
-            symbol,
-            font=large_font if index == 0 else small_font,
+            _drawable_symbol(font, symbol),
+            font=font,
             anchor="mm",
             fill=LETTER_FILL,
             stroke_width=3 if index == 0 else 2,

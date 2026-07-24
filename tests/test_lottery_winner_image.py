@@ -2,14 +2,16 @@ from io import BytesIO
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import call, patch
 
-from PIL import Image, ImageChops
+from PIL import Image, ImageChops, ImageFont
 
 from content import lottery as lottery_content
 from scripts.lottery_winner_image import (
     BALL_FILL,
     BASE_SLOT_CENTERS,
     DEFAULT_TEMPLATE_PATH,
+    FONT_CANDIDATES,
     REPEAT_SLICE_LEFT,
     REPEAT_SLICE_RIGHT,
     REPEAT_SLICE_WIDTH,
@@ -17,6 +19,8 @@ from scripts.lottery_winner_image import (
     render_winner_png,
     render_winner_image,
     resolve_font_path,
+    _drawable_symbol,
+    _load_font,
     _slot_centers,
 )
 
@@ -128,6 +132,49 @@ class LotteryWinnerImageTests(unittest.TestCase):
         with Image.open(BytesIO(payload)) as image:
             self.assertEqual("PNG", image.format)
             self.assertEqual((1280, 720), image.size)
+
+    def test_ubuntu_dejavu_bold_is_preferred_system_fallback(self) -> None:
+        self.assertEqual(
+            Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
+            FONT_CANDIDATES[0],
+        )
+
+    def test_missing_system_fonts_fall_back_to_pillow_font(self) -> None:
+        with patch("scripts.lottery_winner_image.FONT_CANDIDATES", ()):
+            payload = render_winner_png("Winner")
+
+        with Image.open(BytesIO(payload)) as image:
+            self.assertEqual("PNG", image.format)
+            self.assertEqual((1280, 720), image.size)
+
+    def test_explicit_missing_font_is_still_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            missing = Path(temp_dir) / "missing-font.ttf"
+
+            with self.assertRaisesRegex(FileNotFoundError, "Файл шрифта не найден"):
+                resolve_font_path(missing)
+
+    def test_pillow_10_default_font_signature_is_supported(self) -> None:
+        fallback = ImageFont.load_default()
+        with patch(
+            "scripts.lottery_winner_image.ImageFont.load_default",
+            side_effect=[TypeError("size is unsupported"), fallback],
+        ) as load_default:
+            selected = _load_font(None, 40)
+
+        self.assertIs(fallback, selected)
+        self.assertEqual([call(size=40), call()], load_default.call_args_list)
+
+    def test_unsupported_bitmap_symbol_degrades_to_question_mark(self) -> None:
+        class AsciiOnlyFont:
+            def getmask(self, symbol: str):
+                if not symbol.isascii():
+                    raise UnicodeEncodeError("ascii", symbol, 0, 1, "unsupported")
+                return object()
+
+        font = AsciiOnlyFont()
+        self.assertEqual("W", _drawable_symbol(font, "W"))
+        self.assertEqual("?", _drawable_symbol(font, "Ж"))
 
     def test_winner_announcement_uses_call_for_winning_ticket(self) -> None:
         caption = lottery_content.winner_announcement(
