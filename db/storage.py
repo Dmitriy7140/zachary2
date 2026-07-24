@@ -39,6 +39,16 @@ MarketPalletUpgradeStatus = Literal[
     "upgraded", "already_upgraded", "insufficient_funds", "no_profile"
 ]
 MarketListingStatus = Literal["ok", "no_profile", "no_item", "limit"]
+IllegalBusinessPurchaseStatus = Literal[
+    "ok", "already_owned", "parent_not_owned", "no_profile", "insufficient_funds",
+]
+IllegalBusinessUpkeepStatus = Literal["paid", "unpaid", "not_due", "not_owned"]
+IllegalBusinessProgressStatus = Literal[
+    "advanced", "not_due", "paused", "stale", "not_owned", "upkeep_due",
+]
+IllegalBusinessCollectionStatus = Literal[
+    "ok", "empty", "not_owned", "no_profile", "hour_due", "upkeep_due",
+]
 
 
 @dataclass(frozen=True)
@@ -47,6 +57,49 @@ class BusinessUpkeepSettlement:
 
     status: BusinessUpkeepStatus
     was_paused: bool = False
+
+
+@dataclass(frozen=True)
+class IllegalBusinessRecord:
+    """Долговечное состояние одного теневого дела игрока."""
+
+    tg_id: int
+    biz: str
+    parent_biz: str
+    level: int
+    paused: bool
+    stage: int
+    accrued: int
+    next_hour_at: str
+    upkeep_at: str
+    revision: int
+    bought_at: str | None
+
+
+@dataclass(frozen=True)
+class IllegalBusinessUpkeepSettlement:
+    """Результат единственной попытки снять зарплату теневого дела."""
+
+    status: IllegalBusinessUpkeepStatus
+    was_paused: bool = False
+
+
+@dataclass(frozen=True)
+class IllegalBusinessProgressSettlement:
+    """Результат CAS-перехода теневого почасового состояния."""
+
+    status: IllegalBusinessProgressStatus
+    revision: int | None = None
+
+
+@dataclass(frozen=True)
+class IllegalBusinessCollection:
+    """Уже зафиксированная выдача грязной кассы для post-commit уведомлений."""
+
+    status: IllegalBusinessCollectionStatus
+    amount: int = 0
+    balance_before: int | None = None
+    balance_after: int | None = None
 
 
 @dataclass(frozen=True)
@@ -267,6 +320,28 @@ async def init() -> None:
             bought_at   TEXT DEFAULT (datetime('now')),
             PRIMARY KEY (tg_id, biz)
         );
+
+        -- Теневые дела существуют отдельно от легальных компаний: их нельзя
+        -- случайно показать в легальном каталоге, а этапы/касса переживают
+        -- рестарт независимо от производства родительской конторы.
+        CREATE TABLE IF NOT EXISTS illegal_businesses (
+            tg_id        INTEGER NOT NULL,
+            biz          TEXT NOT NULL,
+            parent_biz   TEXT NOT NULL,
+            level        INTEGER NOT NULL DEFAULT 1 CHECK (level = 1),
+            paused       INTEGER NOT NULL DEFAULT 0 CHECK (paused IN (0, 1)),
+            stage        INTEGER NOT NULL DEFAULT 0 CHECK (stage BETWEEN 0 AND 8),
+            accrued      INTEGER NOT NULL DEFAULT 0 CHECK (accrued >= 0),
+            next_hour_at TEXT NOT NULL,
+            upkeep_at    TEXT NOT NULL,
+            revision     INTEGER NOT NULL DEFAULT 0,
+            bought_at    TEXT DEFAULT (datetime('now')),
+            PRIMARY KEY (tg_id, biz)
+        );
+        CREATE INDEX IF NOT EXISTS illegal_businesses_hour_idx
+            ON illegal_businesses (paused, next_hour_at);
+        CREATE INDEX IF NOT EXISTS illegal_businesses_upkeep_idx
+            ON illegal_businesses (upkeep_at);
 
         -- отмыв грязных денег через бизнес: закладка вернётся чистой в ready_at
         CREATE TABLE IF NOT EXISTS laundering (
@@ -2307,6 +2382,325 @@ async def set_business_paused(tg_id: int, biz: str, paused: bool) -> None:
         (1 if paused else 0, tg_id, biz),
     )
     await _db.commit()
+
+
+def _illegal_business_record(row: tuple) -> IllegalBusinessRecord:
+    """Превратить фиксированный SELECT-ряд в именованное состояние дела."""
+    return IllegalBusinessRecord(
+        tg_id=row[0],
+        biz=row[1],
+        parent_biz=row[2],
+        level=row[3],
+        paused=bool(row[4]),
+        stage=row[5],
+        accrued=row[6],
+        next_hour_at=row[7],
+        upkeep_at=row[8],
+        revision=row[9],
+        bought_at=row[10],
+    )
+
+
+async def list_illegal_businesses(tg_id: int) -> list[IllegalBusinessRecord]:
+    """Теневые дела игрока в порядке покупки."""
+    cur = await _db.execute(
+        """SELECT tg_id, biz, parent_biz, level, paused, stage, accrued,
+                  next_hour_at, upkeep_at, revision, bought_at
+           FROM illegal_businesses WHERE tg_id = ? ORDER BY bought_at, biz""",
+        (tg_id,),
+    )
+    return [_illegal_business_record(row) for row in await cur.fetchall()]
+
+
+async def get_illegal_business(tg_id: int, biz: str) -> IllegalBusinessRecord | None:
+    """Долговечный снимок одного теневого дела, либо ``None``."""
+    cur = await _db.execute(
+        """SELECT tg_id, biz, parent_biz, level, paused, stage, accrued,
+                  next_hour_at, upkeep_at, revision, bought_at
+           FROM illegal_businesses WHERE tg_id = ? AND biz = ?""",
+        (tg_id, biz),
+    )
+    row = await cur.fetchone()
+    return _illegal_business_record(row) if row else None
+
+
+async def due_illegal_businesses(now_iso: str) -> list[IllegalBusinessRecord]:
+    """Дела, для которых наступил хотя бы часовой или зарплатный срок.
+
+    При паузе прошлый ``next_hour_at`` намеренно остаётся в БД, но в выборку
+    не попадает: планировщик ждёт только следующую зарплату и не догоняет
+    часы до успешного снятия паузы.
+    """
+    cur = await _db.execute(
+        """SELECT tg_id, biz, parent_biz, level, paused, stage, accrued,
+                  next_hour_at, upkeep_at, revision, bought_at
+           FROM illegal_businesses
+           WHERE upkeep_at <= ? OR (paused = 0 AND next_hour_at <= ?)
+           ORDER BY tg_id, biz""",
+            (now_iso, now_iso),
+    )
+    return [_illegal_business_record(row) for row in await cur.fetchall()]
+
+
+async def buy_illegal_business_atomic(
+    tg_id: int,
+    biz: str,
+    parent_biz: str,
+    price: int,
+    next_hour_at: str,
+    upkeep_at: str,
+) -> IllegalBusinessPurchaseStatus:
+    """Купить теневое дело у уже принадлежащей легальной компании.
+
+    Самозанятость отдельно не проверяется: владение родительским легальным
+    бизнесом уже доказывает, что это условие было выполнено при его покупке.
+    """
+    if price <= 0:
+        raise ValueError("price must be positive")
+    async with _economy_lock:
+        connection = _economy_connection()
+        await connection.execute("BEGIN IMMEDIATE")
+        try:
+            cur = await connection.execute(
+                "SELECT 1 FROM profiles WHERE tg_id = ?", (tg_id,)
+            )
+            if not await cur.fetchone():
+                await connection.rollback()
+                return "no_profile"
+            cur = await connection.execute(
+                "SELECT 1 FROM illegal_businesses WHERE tg_id = ? AND biz = ?",
+                (tg_id, biz),
+            )
+            if await cur.fetchone():
+                await connection.rollback()
+                return "already_owned"
+            cur = await connection.execute(
+                "SELECT 1 FROM businesses WHERE tg_id = ? AND biz = ?",
+                (tg_id, parent_biz),
+            )
+            if not await cur.fetchone():
+                await connection.rollback()
+                return "parent_not_owned"
+            if await _spend_zbucks_on(connection, tg_id, price) is None:
+                await connection.rollback()
+                return "insufficient_funds"
+            await connection.execute(
+                """INSERT INTO illegal_businesses
+                   (tg_id, biz, parent_biz, next_hour_at, upkeep_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (tg_id, biz, parent_biz, next_hour_at, upkeep_at),
+            )
+            await connection.commit()
+            return "ok"
+        except BaseException:
+            await connection.rollback()
+            raise
+
+
+async def settle_illegal_upkeep_atomic(
+    tg_id: int,
+    biz: str,
+    amount: int,
+    now_iso: str,
+    expected_upkeep_at: str,
+    next_paid_upkeep_at: str,
+    resume_next_hour_at: str | None,
+    unpaid_upkeep_at: str | None = None,
+) -> IllegalBusinessUpkeepSettlement:
+    """Списать ровно одну зарплату или приостановить теневое дело.
+
+    ``expected_upkeep_at`` — CAS-граница хронологического replay, а
+    ``now_iso`` дополнительно запрещает досрочно списать будущую зарплату.
+    Это не позволяет двум scheduler-тиккам снять один и тот же день дважды.
+    При возобновлении после паузы старые часы не начисляются задним числом.
+
+    ``next_paid_upkeep_at`` сохраняет хронологический catch-up при успехе.
+    ``unpaid_upkeep_at`` нужен для первой неуплаты после простоя: её нельзя
+    повторять за каждый пропущенный день в следующем scheduler-тике.
+    """
+    if amount <= 0:
+        raise ValueError("amount must be positive")
+    async with _economy_lock:
+        connection = _economy_connection()
+        await connection.execute("BEGIN IMMEDIATE")
+        try:
+            cur = await connection.execute(
+                """SELECT paused, upkeep_at FROM illegal_businesses
+                   WHERE tg_id = ? AND biz = ?""",
+                (tg_id, biz),
+            )
+            row = await cur.fetchone()
+            if not row:
+                await connection.rollback()
+                return IllegalBusinessUpkeepSettlement("not_owned")
+            was_paused = bool(row[0])
+            if row[1] != expected_upkeep_at or row[1] > now_iso:
+                await connection.rollback()
+                return IllegalBusinessUpkeepSettlement("not_due", was_paused)
+            if await _spend_zbucks_on(connection, tg_id, amount) is not None:
+                if was_paused:
+                    if resume_next_hour_at is None:
+                        raise ValueError("resume_next_hour_at is required for paused business")
+                    await connection.execute(
+                        """UPDATE illegal_businesses
+                           SET paused = 0, upkeep_at = ?, next_hour_at = ?,
+                               revision = revision + 1
+                           WHERE tg_id = ? AND biz = ? AND upkeep_at = ?""",
+                        (next_paid_upkeep_at, resume_next_hour_at, tg_id, biz, expected_upkeep_at),
+                    )
+                else:
+                    await connection.execute(
+                        """UPDATE illegal_businesses
+                           SET paused = 0, upkeep_at = ?, revision = revision + 1
+                           WHERE tg_id = ? AND biz = ? AND upkeep_at = ?""",
+                        (next_paid_upkeep_at, tg_id, biz, expected_upkeep_at),
+                    )
+                await connection.commit()
+                return IllegalBusinessUpkeepSettlement("paid", was_paused)
+
+            await connection.execute(
+                """UPDATE illegal_businesses
+                   SET paused = 1, upkeep_at = ?, revision = revision + 1
+                   WHERE tg_id = ? AND biz = ? AND upkeep_at = ?""",
+                (unpaid_upkeep_at or next_paid_upkeep_at, tg_id, biz, expected_upkeep_at),
+            )
+            await connection.commit()
+            return IllegalBusinessUpkeepSettlement("unpaid", was_paused)
+        except BaseException:
+            await connection.rollback()
+            raise
+
+
+async def advance_illegal_business_atomic(
+    tg_id: int,
+    biz: str,
+    expected_revision: int,
+    expected_next_hour_at: str,
+    stage: int,
+    accrued: int,
+    next_hour_at: str,
+    now_iso: str,
+) -> IllegalBusinessProgressSettlement:
+    """CAS-зафиксировать один рассчитанный почасовой переход теневого дела."""
+    if not 0 <= stage <= 8:
+        raise ValueError("stage must be between 0 and 8")
+    if accrued < 0:
+        raise ValueError("accrued must be non-negative")
+    async with _economy_lock:
+        connection = _economy_connection()
+        await connection.execute("BEGIN IMMEDIATE")
+        try:
+            cur = await connection.execute(
+                """SELECT paused, stage, accrued, next_hour_at, upkeep_at, revision
+                   FROM illegal_businesses WHERE tg_id = ? AND biz = ?""",
+                (tg_id, biz),
+            )
+            row = await cur.fetchone()
+            if not row:
+                await connection.rollback()
+                return IllegalBusinessProgressSettlement("not_owned")
+            paused, _stored_stage, _stored_accrued, stored_hour, upkeep_at, revision = row
+            if paused:
+                await connection.rollback()
+                return IllegalBusinessProgressSettlement("paused", revision)
+            # ``now_iso`` может быть на много суток позже границы, которую
+            # scheduler сейчас честно проигрывает после простоя.  Блокируем
+            # только час, который наступил не раньше собственной зарплаты:
+            # более ранние часы должны дойти до неё по хронологии.
+            if upkeep_at <= expected_next_hour_at:
+                await connection.rollback()
+                return IllegalBusinessProgressSettlement("upkeep_due", revision)
+            if stored_hour > now_iso:
+                await connection.rollback()
+                return IllegalBusinessProgressSettlement("not_due", revision)
+            if revision != expected_revision or stored_hour != expected_next_hour_at:
+                await connection.rollback()
+                return IllegalBusinessProgressSettlement("stale", revision)
+            cur = await connection.execute(
+                """UPDATE illegal_businesses
+                   SET stage = ?, accrued = ?, next_hour_at = ?, revision = revision + 1
+                   WHERE tg_id = ? AND biz = ? AND revision = ? AND next_hour_at = ?
+                     AND paused = 0 AND upkeep_at > ?""",
+                (stage, accrued, next_hour_at, tg_id, biz, expected_revision,
+                 expected_next_hour_at, expected_next_hour_at),
+            )
+            if cur.rowcount != 1:
+                await connection.rollback()
+                return IllegalBusinessProgressSettlement("stale", revision)
+            await connection.commit()
+            return IllegalBusinessProgressSettlement("advanced", expected_revision + 1)
+        except BaseException:
+            await connection.rollback()
+            raise
+
+
+async def collect_illegal_income_atomic(
+    tg_id: int,
+    biz: str,
+    now_iso: str,
+    next_hour_at: str,
+) -> IllegalBusinessCollection:
+    """Выдать всю кассу грязными деньгами и сбросить цикл одним commit.
+
+    Если между отрисовкой экрана и кликом наступил новый час или зарплата,
+    caller обязан сначала пропустить дело через timeline.  Это исключает
+    возможность инкассировать старую кассу, минуя риск следующего часа.
+    """
+    async with _economy_lock:
+        connection = _economy_connection()
+        await connection.execute("BEGIN IMMEDIATE")
+        try:
+            cur = await connection.execute(
+                """SELECT paused, accrued, next_hour_at, upkeep_at, revision
+                   FROM illegal_businesses WHERE tg_id = ? AND biz = ?""",
+                (tg_id, biz),
+            )
+            business = await cur.fetchone()
+            if not business:
+                await connection.rollback()
+                return IllegalBusinessCollection("not_owned")
+            paused, accrued, due_hour, due_upkeep, revision = business
+            if due_upkeep <= now_iso:
+                await connection.rollback()
+                return IllegalBusinessCollection("upkeep_due")
+            if not paused and due_hour <= now_iso:
+                await connection.rollback()
+                return IllegalBusinessCollection("hour_due")
+            if accrued <= 0:
+                await connection.rollback()
+                return IllegalBusinessCollection("empty")
+            cur = await connection.execute(
+                "SELECT zbucks, dirty FROM profiles WHERE tg_id = ?", (tg_id,)
+            )
+            profile = await cur.fetchone()
+            if not profile:
+                await connection.rollback()
+                return IllegalBusinessCollection("no_profile")
+            balance_before = profile[0]
+            balance_after = balance_before + accrued
+            await connection.execute(
+                """UPDATE profiles
+                   SET zbucks = zbucks + ?,
+                       dirty = MIN(zbucks + ?, COALESCE(dirty, 0) + ?)
+                   WHERE tg_id = ?""",
+                (accrued, accrued, accrued, tg_id),
+            )
+            cur = await connection.execute(
+                """UPDATE illegal_businesses
+                   SET stage = 0, accrued = 0, next_hour_at = ?, revision = revision + 1
+                   WHERE tg_id = ? AND biz = ? AND revision = ?""",
+                (next_hour_at, tg_id, biz, revision),
+            )
+            if cur.rowcount != 1:
+                await connection.rollback()
+                return IllegalBusinessCollection("hour_due")
+            await connection.commit()
+            return IllegalBusinessCollection(
+                "ok", accrued, balance_before, balance_after,
+            )
+        except BaseException:
+            await connection.rollback()
+            raise
 
 
 async def due_production(now_iso: str) -> list[tuple]:
