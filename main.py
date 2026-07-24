@@ -9,6 +9,7 @@ from config import config
 from db import storage
 from game.bets import run_bets_scheduler
 from game.business import run_business_scheduler
+from game.cube import bootstrap_cube, run_cube_scheduler
 from game.daily import run_daily_scheduler
 from game.debts import run_debts_scheduler
 from game.fishing import run_fishing_scheduler
@@ -16,8 +17,8 @@ from game.lottery import ensure_current_round, run_lottery_scheduler
 from game.market import run_market_scheduler
 from game.richest import run_richest_watcher
 from game.taxman import run_gustav_scheduler
-from handlers import (admin, bets, business, cashier, chef, companion, courier, farca,
-                      finance, fishing, inventory, loan, lottery, market, minigames,
+from handlers import (admin, bets, business, cashier, chef, companion, courier, cube,
+                      farca, finance, fishing, inventory, loan, lottery, market, minigames,
                       pranks, registration, roulette, scammer, shady, shop, stats,
                       vovka, vpn, work)
 from mc.poller import run_poller
@@ -37,6 +38,8 @@ async def main() -> None:
     try:
         # Polling не должен стартовать без долговечного текущего тиража.
         await ensure_current_round()
+        # Куб тоже должен существовать до первого пользовательского callback.
+        await bootstrap_cube()
 
         bot = Bot(config.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
         dp = Dispatcher()
@@ -44,6 +47,7 @@ async def main() -> None:
         dp.include_router(stats.router)
         dp.include_router(registration.router)
         dp.include_router(minigames.router)
+        dp.include_router(cube.router)
         dp.include_router(lottery.router)
         dp.include_router(vovka.router)
         dp.include_router(roulette.router)
@@ -79,6 +83,7 @@ async def main() -> None:
             asyncio.create_task(run_gustav_scheduler(bot)),
             asyncio.create_task(run_business_scheduler(bot)),
             asyncio.create_task(run_lottery_scheduler(bot)),
+            asyncio.create_task(run_cube_scheduler(bot)),
         ]
 
         logging.info("Бот запущен")
