@@ -1,4 +1,4 @@
-"""Меню бизнесов: легальные конторы, отмыв и бистро слизней."""
+"""Меню бизнесов: легальные конторы, теневые схемы, отмыв и бистро слизней."""
 from datetime import datetime, timedelta
 
 from aiogram import Bot, F, Router
@@ -8,6 +8,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from aiogram.utils.markdown import hlink
 
+from content import illegal_business as illegal_text
 from content import slugs as slug_text
 from content.business import (MOSQUITO_LORE, UPGRADE2_LORE, UPGRADE3_LORE,
                               bought as mosquito_bought, launder_done, launder_start,
@@ -15,15 +16,20 @@ from content.business import (MOSQUITO_LORE, UPGRADE2_LORE, UPGRADE3_LORE,
                               upgraded2, upgraded3)
 from db import storage
 from game.business import (BIZ_MOSQUITO, BIZ_SLUGS, BUSINESS_KEYS,
+                           ILLEGAL_BUSINESS_KEYS,
                            LAUNDER_HOURS, MOSQUITO_CORN, MOSQUITO_EGGS,
                            MOSQUITO_POTATO, MOSQUITO_PRICE, NAME_MAXLEN,
                            SE_TAX_KEY, SELF_EMPLOY_COST, SELF_EMPLOY_TAX,
                            SLUG_LORE, SLUG_PRICE, TIER_SMALL, available_slug_recipes,
                            biz_display, business_card_name, business_purchase_price,
-                           get_slug_recipe, launder_cap_for, slug_recipe_limit,
-                           upgrade_price, upkeep_for)
+                           get_slug_recipe, illegal_business_card_name,
+                           illegal_business_display, illegal_business_parent,
+                           illegal_business_purchase_price, illegal_business_upkeep,
+                           illegal_stage, launder_cap_for, settle_illegal_timeline,
+                           slug_recipe_limit, upgrade_price, upkeep_for)
 from game.cars import has_car
 from game.items import ITEMS
+from game.taxman import maybe_gustav
 from utils.cleanup import delete_later
 from utils.guards import ensure_private, with_owner
 from utils.notify import announce
@@ -55,6 +61,10 @@ def _known_business(biz: str) -> bool:
     return biz in BUSINESS_KEYS
 
 
+def _known_illegal_business(biz: str) -> bool:
+    return biz in ILLEGAL_BUSINESS_KEYS
+
+
 def _back_to_legal(tg_id: int) -> list[InlineKeyboardButton]:
     return [InlineKeyboardButton(text="⬅️ К легальному бизнесу", callback_data="biz:legal"),
             InlineKeyboardButton(text="🏠 В меню", callback_data=with_owner("menu:main", tg_id))]
@@ -62,6 +72,11 @@ def _back_to_legal(tg_id: int) -> list[InlineKeyboardButton]:
 
 def _back_to_root(tg_id: int) -> list[InlineKeyboardButton]:
     return [InlineKeyboardButton(text="⬅️ К бизнесу", callback_data="menu:business"),
+            InlineKeyboardButton(text="🏠 В меню", callback_data=with_owner("menu:main", tg_id))]
+
+
+def _back_to_illegal(tg_id: int) -> list[InlineKeyboardButton]:
+    return [InlineKeyboardButton(text="⬅️ К нелегальному бизнесу", callback_data="ibiz:menu"),
             InlineKeyboardButton(text="🏠 В меню", callback_data=with_owner("menu:main", tg_id))]
 
 
@@ -77,6 +92,11 @@ async def _owned_businesses(tg_id: int) -> list[tuple]:
     return [row for row in await storage.list_businesses(tg_id) if row[0] in BUSINESS_KEYS]
 
 
+async def _owned_illegal_businesses(tg_id: int):
+    return [row for row in await storage.list_illegal_businesses(tg_id)
+            if row.biz in ILLEGAL_BUSINESS_KEYS]
+
+
 async def _render_root(message: Message, tg_id: int) -> None:
     await show_photo_menu(
         message,
@@ -87,7 +107,7 @@ async def _render_root(message: Message, tg_id: int) -> None:
         "а ты — иногда проверять, куда именно. Выбирай сторону предпринимательства.",
         _kb([
             [InlineKeyboardButton(text="✅ Легальный", callback_data="biz:legal")],
-            [InlineKeyboardButton(text="🕶 Нелегальный", callback_data="biz:illegal")],
+            [InlineKeyboardButton(text="🕶 Нелегальный", callback_data="ibiz:menu")],
             [InlineKeyboardButton(text="⬅️ В меню", callback_data=with_owner("menu:main", tg_id))],
         ]),
     )
@@ -133,6 +153,148 @@ async def _render_catalog(message: Message, tg_id: int) -> None:
         lines.append("Выбери контору. Бумаги нужны настоящие, а идеи — как получится.")
     rows.append(_back_to_legal(tg_id))
     await show_text_menu(message, "\n".join(lines), _kb(rows))
+
+
+async def _render_illegal_menu(message: Message, tg_id: int, bot: Bot) -> None:
+    """Корень теневого дела: сначала догоняем часы, потом показываем кассы."""
+    owned = await _owned_illegal_businesses(tg_id)
+    for row in owned:
+        await settle_illegal_timeline(bot, tg_id, row.biz)
+    owned = await _owned_illegal_businesses(tg_id)
+
+    lines = [
+        "🕶 <b>Нелегальный бизнес</b>",
+        "",
+        "Здесь деньги растут быстрее, чем доверие комарих к твоим мешкам налички.",
+    ]
+    rows: list[list[InlineKeyboardButton]] = []
+    if owned:
+        lines.extend(["", "<b>Твои теневые дела:</b>"])
+        for row in owned:
+            stage = f" · этап {row.stage}" if row.stage else " · касса разгоняется"
+            rows.append([InlineKeyboardButton(
+                text=f"{illegal_business_card_name(row.biz)}{stage}",
+                callback_data=f"ibiz:open:{row.biz}",
+            )])
+    else:
+        lines.extend(["", "Пока без схем. Бухгалтерия этому даже рада."])
+    rows.append([InlineKeyboardButton(text="🕳️ Каталог схем", callback_data="ibiz:catalog")])
+    rows.append(_back_to_root(tg_id))
+    await show_photo_menu(message, BIZ_OFFICE_PHOTO, BIZ_OFFICE_META, "\n".join(lines), _kb(rows))
+
+
+async def _render_illegal_catalog(message: Message, tg_id: int) -> None:
+    owned = {row.biz for row in await _owned_illegal_businesses(tg_id)}
+    lines = ["🕳️ <b>Каталог схем</b>", ""]
+    rows: list[list[InlineKeyboardButton]] = []
+    for biz in ILLEGAL_BUSINESS_KEYS:
+        if biz in owned:
+            continue
+        parent = illegal_business_parent(biz)
+        if not await storage.get_business(tg_id, parent):
+            lines.append(
+                f"🔒 {illegal_business_card_name(biz)}: сначала нужен легальный "
+                f"{business_card_name(parent)}."
+            )
+            rows.append([InlineKeyboardButton(
+                text=f"🔒 {illegal_business_card_name(biz)}",
+                callback_data=f"ibiz:card:{biz}",
+            )])
+            continue
+        rows.append([InlineKeyboardButton(
+            text=(f"{illegal_business_card_name(biz)} — "
+                  f"{illegal_business_purchase_price(biz)} Z"),
+            callback_data=f"ibiz:card:{biz}",
+        )])
+    if not rows:
+        lines.append("Все доступные схемы уже твои. Не показывай это бухгалтеру.")
+    else:
+        lines.append("Выбери схему. Если она закрыта — сначала выстрой легальную ширму.")
+    rows.append(_back_to_illegal(tg_id))
+    await show_photo_menu(message, BIZ_OFFICE_PHOTO, BIZ_OFFICE_META, "\n".join(lines), _kb(rows))
+
+
+async def _show_illegal_card(cb: CallbackQuery, biz: str) -> None:
+    if not _known_illegal_business(biz):
+        return await cb.answer("Нет такой схемы", show_alert=True)
+    tg_id = cb.from_user.id
+    if await storage.get_illegal_business(tg_id, biz):
+        return await cb.answer("У тебя уже есть это теневое дело", show_alert=True)
+    parent = illegal_business_parent(biz)
+    if not await storage.get_business(tg_id, parent):
+        await show_photo_menu(
+            cb.message,
+            BIZ_OFFICE_PHOTO,
+            BIZ_OFFICE_META,
+            "🔒 <b>Схема закрыта</b>\n\n"
+            f"Сначала нужен легальный {business_card_name(parent)}. "
+            "Без него комарихам негде изображать нормальный бизнес.",
+            _kb([_back_to_illegal(tg_id)]),
+        )
+        return await cb.answer()
+    price = illegal_business_purchase_price(biz)
+    await show_photo_menu(
+        cb.message,
+        BIZ_OFFICE_PHOTO,
+        BIZ_OFFICE_META,
+        f"{illegal_text.ILLEGAL_LORE}\n\n"
+        f"<b>{illegal_business_display(biz)}</b>\n"
+        f"Цена: <b>{price} Z</b> · зарплаты комарихам "
+        f"{illegal_business_upkeep(biz)} Z/день.",
+        _kb([
+            [InlineKeyboardButton(text=f"💰 Купить за {price} Z",
+                                  callback_data=f"ibiz:buy:{biz}")],
+            _back_to_illegal(tg_id),
+        ]),
+    )
+    await cb.answer()
+
+
+def _illegal_countdown(next_hour_at: str | None) -> str:
+    if not next_hour_at:
+        return "не назначен"
+    try:
+        seconds = max(0, int((datetime.fromisoformat(next_hour_at) - datetime.now()).total_seconds()))
+    except (TypeError, ValueError):
+        return "скоро"
+    return f"{seconds // 3600}ч {seconds % 3600 // 60}м"
+
+
+async def _render_illegal_business(message: Message, tg_id: int, biz: str, bot: Bot) -> bool:
+    """Показать одну схему только после durable catch-up её таймлайна."""
+    if not _known_illegal_business(biz):
+        return False
+    await settle_illegal_timeline(bot, tg_id, biz)
+    row = await storage.get_illegal_business(tg_id, biz)
+    if not row:
+        return False
+    stage = illegal_stage(row.stage)
+    risk = stage.theft_chance if stage else 0
+    phrase = stage.message if stage else illegal_text.stage_message(0)
+    income_line = (
+        "Первый час принесёт: <b>+50 Z</b>"
+        if stage is None else f"Доход текущего этапа: <b>+{stage.income} Z/час</b>"
+    )
+    next_hour = ("⛔ работа стоит до следующей оплаты зарплат"
+                 if row.paused else _illegal_countdown(row.next_hour_at))
+    lines = [
+        f"🕳️ <b>{illegal_business_display(biz)}</b>",
+        f"Статус: {'⛔ приостановлен (не оплачены зарплаты)' if row.paused else '✅ работает'}",
+        f"Зарплаты комарихам: {illegal_business_upkeep(biz)} Z/день",
+        f"Этап: <b>{row.stage}/8</b>",
+        f"Касса: <b>{row.accrued} Z</b>",
+        income_line,
+        f"До следующей часовой границы: <b>{next_hour}</b>",
+        f"Риск потерять всю кассу на следующей границе: <b>{risk}%</b>",
+        "",
+        f"<i>{phrase}</i>",
+    ]
+    rows = [
+        [InlineKeyboardButton(text="💰 Забрать грязные бабки", callback_data=f"ibiz:collect:{biz}")],
+        _back_to_illegal(tg_id),
+    ]
+    await show_photo_menu(message, BIZ_OFFICE_PHOTO, BIZ_OFFICE_META, "\n".join(lines), _kb(rows))
+    return True
 
 
 def _mosquito_production(level: int) -> str:
@@ -234,17 +396,158 @@ async def business_legal(cb: CallbackQuery):
     await cb.answer()
 
 
-@router.callback_query(F.data == "biz:illegal")
-async def business_illegal(cb: CallbackQuery):
+async def _open_illegal_menu(cb: CallbackQuery, bot: Bot) -> None:
+    if not await storage.get_profile(cb.from_user.id):
+        return await cb.answer("Сначала зарегистрируйся 😉", show_alert=True)
+    await _render_illegal_menu(cb.message, cb.from_user.id, bot)
+    await cb.answer()
+
+
+@router.callback_query(F.data == "ibiz:menu")
+async def illegal_business_menu(cb: CallbackQuery, bot: Bot):
     if not await ensure_private(cb):
         return
-    await show_text_menu(
-        cb.message,
-        "🕶 <b>Нелегальный бизнес</b>\n\n"
-        "Пока тут пусто: схемы ещё сушатся на батарее, а бухгалтер прячется от Густава.",
-        _kb([_back_to_root(cb.from_user.id)]),
-    )
+    await _open_illegal_menu(cb, bot)
+
+
+@router.callback_query(F.data == "biz:illegal")
+async def legacy_business_illegal(cb: CallbackQuery, bot: Bot):
+    """Старые корневые кнопки ведут в новое namespaced-меню."""
+    if not await ensure_private(cb):
+        return
+    await _open_illegal_menu(cb, bot)
+
+
+@router.callback_query(F.data == "ibiz:catalog")
+async def illegal_business_catalog(cb: CallbackQuery):
+    if not await ensure_private(cb):
+        return
+    if not await storage.get_profile(cb.from_user.id):
+        return await cb.answer("Сначала зарегистрируйся 😉", show_alert=True)
+    await _render_illegal_catalog(cb.message, cb.from_user.id)
     await cb.answer()
+
+
+@router.callback_query(F.data.startswith("ibiz:card:"))
+async def illegal_business_card(cb: CallbackQuery):
+    if not await ensure_private(cb):
+        return
+    if not await storage.get_profile(cb.from_user.id):
+        return await cb.answer("Сначала зарегистрируйся 😉", show_alert=True)
+    parts = cb.data.split(":")
+    if len(parts) != 3:
+        return await cb.answer("Старая кнопка схемы", show_alert=True)
+    await _show_illegal_card(cb, parts[2])
+
+
+@router.callback_query(F.data.startswith("ibiz:buy:"))
+async def illegal_business_buy(cb: CallbackQuery, bot: Bot):
+    if not await ensure_private(cb):
+        return
+    if not await storage.get_profile(cb.from_user.id):
+        return await cb.answer("Сначала зарегистрируйся 😉", show_alert=True)
+    parts = cb.data.split(":")
+    if len(parts) != 3 or not _known_illegal_business(parts[2]):
+        return await cb.answer("Нет такой схемы", show_alert=True)
+    biz = parts[2]
+    parent_biz = illegal_business_parent(biz)
+    now = datetime.now()
+    status = await storage.buy_illegal_business_atomic(
+        cb.from_user.id,
+        biz,
+        parent_biz,
+        illegal_business_purchase_price(biz),
+        (now + timedelta(hours=1)).isoformat(),
+        (now + timedelta(days=1)).isoformat(),
+    )
+    errors = {
+        "already_owned": "У тебя уже есть это теневое дело",
+        "missing_parent": "Сначала купи Комар-фарм Логистикс",
+        "parent_missing": "Сначала купи Комар-фарм Логистикс",
+        "parent_not_owned": "Сначала купи Комар-фарм Логистикс",
+        "insufficient_funds": f"Не хватает Z (нужно {illegal_business_purchase_price(biz)})",
+        "no_profile": "Сначала зарегистрируйся 😉",
+    }
+    if status != "ok":
+        return await cb.answer(errors.get(status, "Не удалось оформить схему"), show_alert=True)
+
+    parent = await storage.get_business(cb.from_user.id, parent_biz)
+    parent_name = biz_display(parent[2] if parent else None, parent[1] if parent else 1, parent_biz)
+    await announce(
+        bot,
+        illegal_text.bought(
+            _mention(cb.from_user.id, cb.from_user.full_name),
+            parent_name,
+            illegal_business_display(biz),
+            illegal_business_purchase_price(biz),
+        ),
+    )
+    await _render_illegal_business(cb.message, cb.from_user.id, biz, bot)
+    await cb.answer("Схема оформлена. Касса начнёт расти через час.", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("ibiz:open:"))
+async def illegal_business_open(cb: CallbackQuery, bot: Bot):
+    if not await ensure_private(cb):
+        return
+    if not await storage.get_profile(cb.from_user.id):
+        return await cb.answer("Сначала зарегистрируйся 😉", show_alert=True)
+    parts = cb.data.split(":")
+    if len(parts) != 3:
+        return await cb.answer("Старая кнопка схемы", show_alert=True)
+    if not await _render_illegal_business(cb.message, cb.from_user.id, parts[2], bot):
+        return await cb.answer("Этой схемы у тебя уже нет", show_alert=True)
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("ibiz:collect:"))
+async def illegal_business_collect(cb: CallbackQuery, bot: Bot):
+    if not await ensure_private(cb):
+        return
+    if not await storage.get_profile(cb.from_user.id):
+        return await cb.answer("Сначала зарегистрируйся 😉", show_alert=True)
+    parts = cb.data.split(":")
+    if len(parts) != 3 or not _known_illegal_business(parts[2]):
+        return await cb.answer("Нет такой схемы", show_alert=True)
+    biz = parts[2]
+    # Не даём кнопке забрать устаревшую кассу: все пропущенные часы сначала
+    # фиксируются durable-таймлайном, включая возможную кражу.
+    await settle_illegal_timeline(bot, cb.from_user.id, biz)
+    now = datetime.now()
+    result = await storage.collect_illegal_income_atomic(
+        cb.from_user.id,
+        biz,
+        now.isoformat(),
+        (now + timedelta(hours=1)).isoformat(),
+    )
+    errors = {
+        "not_owned": "Этой схемы у тебя уже нет",
+        "paused": "Комарихи не работают, пока не получат зарплату",
+        "empty": "В кассе пока пусто — дождись хотя бы одного часа",
+        "nothing_to_collect": "В кассе пока пусто — дождись хотя бы одного часа",
+        "hour_due": "Касса обновляется — нажми ещё раз через секунду",
+        "upkeep_due": "Зарплаты обновляются — нажми ещё раз через секунду",
+        "no_profile": "Сначала зарегистрируйся 😉",
+    }
+    if result.status != "ok":
+        # Timeline мог только что зафиксировать кражу или паузу; не оставляем
+        # на фото-экране старую кассу после корректного stale-ответа.
+        if result.status in {"empty", "hour_due", "upkeep_due"}:
+            await _render_illegal_business(cb.message, cb.from_user.id, biz, bot)
+        return await cb.answer(errors.get(result.status, "Не удалось забрать кассу"), show_alert=True)
+
+    # Доход уже записан вместе с обнулением кассы; Густав и объявления идут
+    # строго после commit, чтобы сбой Telegram не менял экономический итог.
+    await maybe_gustav(bot, cb.from_user.id, result.balance_before, result.balance_after)
+    await announce(
+        bot,
+        illegal_text.collected_thread(
+            _mention(cb.from_user.id, cb.from_user.full_name),
+            illegal_business_display(biz),
+        ),
+    )
+    await _render_illegal_business(cb.message, cb.from_user.id, biz, bot)
+    await cb.answer(illegal_text.collected_personal(result.amount), show_alert=True)
 
 
 @router.callback_query(F.data == "biz:catalog")
