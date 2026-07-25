@@ -9,6 +9,21 @@ LEVEL_NAMES = [
     "Зубенко Михаил Петрович",
 ]
 
+BANDIT_QUOTES = (
+    "Если дверь закрыта — значит, внутри считают деньги без нас.",
+    "Честность хороша, пока за неё не требуют предоплату.",
+    "У района два закона: один на стене, второй — в кармане.",
+    "Кто рано встаёт, тот первым замечает незапертую кассу.",
+    "Богатство любит тишину, а мы любим знать, где оно прячется.",
+    "На словах все за порядок, пока монтировка не загремит в подъезде.",
+    "В капитализме главное — не потерять лицо. Кошелёк уже поздно.",
+    "План простой: взять чужое и назвать это перераспределением.",
+)
+
+
+def illegal_work_quote() -> str:
+    return random.choice(BANDIT_QUOTES)
+
 # Названия исходов для игрока (от лучшего к худшему)
 QUALITY_NAMES = {
     "КУ": "Ободрал до липки",
@@ -85,3 +100,30 @@ def success(quality: str, target: str, amount: int) -> str:
 
 def success_chat(quality: str, thief: str, target: str) -> str:
     return _SUCCESS_CHAT[quality].format(thief=thief, target=target)
+
+
+BUSINESS_MENU = (
+    "🦹 <b>Вор</b>\n"
+    "Карманники работают тихо. Предприятия — громко, монтировкой и с классовой ненавистью."
+)
+BUSINESS_LIST = (
+    "🏢 <b>Обнести бизнес?</b>\n"
+    "Давай, пора играть по-крупному: украдём все отмываемые бабки. "
+    "А если их нет — спиздим всю продукцию."
+)
+
+
+def business_confirm(name: str, owner: str) -> str:
+    return f"🏢 <b>Ограбить {name}?</b>\nВладелец: <b>{owner}</b>"
+
+
+def business_money_loot(name: str, amount: int) -> str:
+    return f"🔧 Вскрыл <b>{name}</b> и вынес из отмыва <b>{amount} Z</b> грязными."
+
+
+def business_product_loot(name: str, products: str) -> str:
+    return f"🔧 В отмыве пусто, зато из <b>{name}</b> вынес: {products}."
+
+
+def business_empty(name: str) -> str:
+    return f"😞 В <b>{name}</b> ни денег в отмыве, ни продукции. Ушёл домой грустный."

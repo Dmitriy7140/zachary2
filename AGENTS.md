@@ -33,6 +33,8 @@ PYTHONPYCACHEPREFIX=/tmp/zachary2-pycache python -m compileall -q main.py config
 python -m pip check
 python -B -c 'import main; print("imports OK")'
 PYTHONPYCACHEPREFIX=/tmp/zachary2-pycache python -m unittest -v tests.test_lottery
+PYTHONPYCACHEPREFIX=/tmp/zachary2-pycache python -m unittest -v tests.test_business_robbery
+PYTHONPYCACHEPREFIX=/tmp/zachary2-pycache python -m unittest -v tests.test_illegal_job_levels
 git diff --check
 git diff --cached --check
 git status --short
@@ -67,7 +69,7 @@ git status --short
 
 ## Как хранится состояние
 
-1. **SQLite переживает рестарт.** `storage.init()` открывает общий `aiosqlite.Connection` и отдельное сериализованное economy-соединение для критичных списаний/лотереи/Куба. В SQLite живут профили (включая одноразовый уровень палеты рынка), деньги, опыт, inventory, cooldown/status, статистика, рынок, ставки, долги, рыбалка, несколько бизнесов игрока, отмыв с ключом компании, поштучная очередь `slug_cooking`, тиражи/билеты/idempotency-запросы/outbox лотереи, поколения/комнаты/забеги/личные посещения/outbox Куба и `meta`.
+1. **SQLite переживает рестарт.** `storage.init()` открывает общий `aiosqlite.Connection` и отдельное сериализованное economy-соединение для критичных списаний/лотереи/Куба. В SQLite живут профили (включая одноразовый уровень палеты рынка), деньги, опыт, inventory, cooldown/status, статистика, рынок, ставки, долги, рыбалка, несколько бизнесов игрока, отмыв с ключом компании, поштучная очередь `slug_cooking`, cooldown’ы налётов на предприятия и доступ вора к теневой части после легального налёта, тиражи/билеты/idempotency-запросы/outbox лотереи, поколения/комнаты/забеги/личные посещения/outbox Куба и `meta`.
 2. **FSM — только короткий ввод.** `Dispatcher()` использует стандартный in-memory storage aiogram со стратегией `USER_IN_CHAT`, без TTL и явной event isolation. Паттерн: `set_state()` → `update_data()` с доменными ID и актуальными `chat_id/msg_id` → state-filtered message handler → `get_data()` → `clear()` → повторная проверка БД. FSM теряется при рестарте; общего `/cancel` нет. Переход в меню или команда сами state не очищают, а state-handler более раннего router может перехватить команду — отмену проектируй явно.
 3. **Активные партии — RAM.** `cashier`, `chef`, `courier`, `vpn`, `vovka`, `scammer` держат `_games[tg_id]`; у scammer FSM лишь маршрутизирует сообщения, а authoritative state находится в `_games`. `_bg`, `_tasks` и `_hit_log` тоже процессные. Перезапуск обрывает партии, но уже записанный SQLite cooldown остаётся.
 4. **Callback data — публичный маршрут, не источник истины.** Формат вручную namespaced через `:`. Храни там только короткие ID/choice/page/round/owner; секретный ответ и authoritative round держи на сервере. Перед мутацией перечитывай БД и отвергай stale/double click.
@@ -77,7 +79,7 @@ git status --short
 
 - Не пиши SQL вне `db/storage.py`. Используй `?`-параметры; новую таблицу создавай идемпотентно в `init()`, additive-колонку добавляй через `_ensure_column`.
 - Storage обычно возвращает позиционные tuple; лотерея использует frozen dataclass для явно именованных снимков/результатов. Для tuple сверяй индекс с конкретным `SELECT` и docstring; при изменении формы обновляй все call sites.
-- Почти каждый mutating helper сам делает `commit()`. Несколько helper-вызовов не образуют транзакцию и могут перемежаться конкурентными update. `spend_zbucks[_traced]`, активация прятки, лотерея, Куб, атомарные бизнес-/рыночные операции, `add_item`, `remove_item` и `clear_inventory` сериализованы через economy connection + `BEGIN IMMEDIATE`; `take_stock` остаётся read-check-write и сам по себе не concurrency-safe.
+- Почти каждый mutating helper сам делает `commit()`. Несколько helper-вызовов не образуют транзакцию и могут перемежаться конкурентными update. `spend_zbucks[_traced]`, активация прятки, лотерея, Куб, налёты на предприятия, атомарные бизнес-/рыночные операции, `add_item`, `remove_item` и `clear_inventory` сериализованы через economy connection + `BEGIN IMMEDIATE`; `take_stock` остаётся read-check-write и сам по себе не concurrency-safe.
 - Новую критичную денежную/inventory операцию делай атомарным условным SQL. Если нужна транзакция, сериализуй всю её границу либо используй отдельное connection: простой `BEGIN` на общем `_db` не мешает другой coroutine вклинить SQL в ту же транзакцию. Одна большая storage-функция без такой границы атомарность не гарантирует.
 - Обычный доход начисляй через `game.taxman.grant()`: это каноническая точка правил dirty/Gustav, но сейчас она сама состоит из нескольких commit и не crash-atomic. Исключение — атомарное завершение отмыва: оно фиксирует чистое зачисление вместе с удалением закладки, а scheduler обязан после commit вызвать `maybe_gustav()` по возвращённым old/new-снимкам баланса. Для перевода сохраняй происхождение денег: `spend_zbucks_traced()` → `grant(..., dirty_part=...)`. Прямой `add_zbucks()` допустим только для осознанного refund/служебного сценария.
 - Расходы проводи через `spend_zbucks()`/`spend_zbucks_traced()`, предметы — через storage helpers: спрятанные и грязные деньги имеют особую семантику.

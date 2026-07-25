@@ -4,15 +4,21 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from aiogram.utils.markdown import hlink
 
 from content.chef import znak_ominous
+from content.shop import shop_vibe
 from content.zhmyzhko import proletarian
 from db import storage
 from game.fishing import BAIT_TIER, fishing_level
-from game.items import ITEMS, shop_items
+from game.items import (INVENTORY_CATEGORIES, INVENTORY_CATEGORY_LABELS, ITEM_CATEGORY, ITEMS,
+                        categorized_items, shop_items)
+from keyboards import alternating_button_rows
 from utils.guards import ensure_owner, with_owner
 from utils.notify import announce
-from utils.photo import show_text_menu
+from utils.photo import show_photo_menu
 
 router = Router()
+
+SHOP_PHOTO = "static/shop_record_stall.png"
+SHOP_PHOTO_META = "shop_record_stall_photo_id"
 
 
 async def _bait_locked(tg_id: int, key: str) -> int:
@@ -24,25 +30,62 @@ async def _bait_locked(tg_id: int, key: str) -> int:
     return tier if lvl < tier else 0
 
 
-async def _render(message, owner: int) -> None:
+async def _render_categories(message, owner: int) -> None:
     profile = await storage.get_profile(owner)
-    rows = []
-    for it in shop_items():
+    categories = categorized_items(shop_items())
+    buttons = [
+        InlineKeyboardButton(
+            text=label,
+            callback_data=with_owner(f"shop:category:{category}", owner),
+        )
+        for category, label in INVENTORY_CATEGORIES
+        if categories[category]
+    ]
+    rows = alternating_button_rows(buttons)
+    rows.append([InlineKeyboardButton(
+        text="🎟 Лотерейные билеты",
+        callback_data=with_owner("lot:view", owner),
+    )])
+    rows.append([InlineKeyboardButton(text="⬅️ В меню", callback_data=with_owner("menu:main", owner))])
+    await show_photo_menu(
+        message,
+        SHOP_PHOTO,
+        SHOP_PHOTO_META,
+        (f"🛒 <b>Магазин</b>\nБаланс: <b>{profile[3]} Z</b>\n\n"
+         f"<i>{shop_vibe()}</i>\n\nВыбери категорию:"),
+        InlineKeyboardMarkup(inline_keyboard=rows),
+    )
+
+
+async def _render_category(message, owner: int, category: str) -> None:
+    profile = await storage.get_profile(owner)
+    buttons = []
+    for it in categorized_items(shop_items())[category]:
         owned = await storage.get_item_qty(owner, it.key)
         need = await _bait_locked(owner, it.key)
         if need:
-            rows.append([InlineKeyboardButton(text=f"🔒 {it.name} — нужен ур. рыбалки {need}",
-                                              callback_data="noop")])
+            buttons.append(InlineKeyboardButton(
+                text=f"🔒 {it.name} — нужен ур. рыбалки {need}", callback_data="noop",
+            ))
         elif owned >= it.max_qty:
-            rows.append([InlineKeyboardButton(text=f"{it.emoji} {it.name} — куплено ✅",
-                                              callback_data="noop")])
+            buttons.append(InlineKeyboardButton(
+                text=f"{it.emoji} {it.name} — куплено ✅", callback_data="noop",
+            ))
         else:
-            rows.append([InlineKeyboardButton(text=f"{it.emoji} {it.name} — {it.price} Z",
-                                              callback_data=with_owner(f"shop:buy:{it.key}", owner))])
-    rows.append([InlineKeyboardButton(text="⬅️ В меню", callback_data=with_owner("menu:main", owner))])
-    await show_text_menu(
+            buttons.append(InlineKeyboardButton(
+                text=f"{it.emoji} {it.name} — {it.price} Z",
+                callback_data=with_owner(f"shop:buy:{it.key}", owner),
+            ))
+    rows = alternating_button_rows(buttons)
+    rows.append([InlineKeyboardButton(
+        text="⬅️ К категориям",
+        callback_data=with_owner("menu:shop", owner),
+    )])
+    await show_photo_menu(
         message,
-        f"🛒 <b>Магазин</b>\nБаланс: <b>{profile[3]} Z</b>",
+        SHOP_PHOTO,
+        SHOP_PHOTO_META,
+        f"🛒 <b>{INVENTORY_CATEGORY_LABELS[category]}</b>\nБаланс: <b>{profile[3]} Z</b>",
         InlineKeyboardMarkup(inline_keyboard=rows),
     )
 
@@ -53,7 +96,23 @@ async def shop_menu(cb: CallbackQuery):
         return
     if not await storage.get_profile(cb.from_user.id):
         return await cb.answer("Сначала зарегистрируйся 😉", show_alert=True)
-    await _render(cb.message, cb.from_user.id)
+    await _render_categories(cb.message, cb.from_user.id)
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("shop:category:"))
+async def shop_category(cb: CallbackQuery):
+    if not await ensure_owner(cb):
+        return
+    tg_id = cb.from_user.id
+    if not await storage.get_profile(tg_id):
+        return await cb.answer("Сначала зарегистрируйся 😉", show_alert=True)
+    parts = (cb.data or "").split(":")
+    category = parts[2] if len(parts) >= 4 else ""
+    categories = categorized_items(shop_items())
+    if category not in INVENTORY_CATEGORY_LABELS or not categories[category]:
+        return await cb.answer("В этом разделе пока ничего не продаётся", show_alert=True)
+    await _render_category(cb.message, tg_id, category)
     await cb.answer()
 
 
@@ -86,4 +145,4 @@ async def shop_buy(cb: CallbackQuery, bot):
         await announce(bot, znak_ominous(buyer))
     else:
         await announce(bot, f"🛒 {buyer} купил {item.emoji} {item.name} за {item.price} Z.\n{proletarian()}")
-    await _render(cb.message, tg_id)
+    await _render_category(cb.message, tg_id, ITEM_CATEGORY[key])

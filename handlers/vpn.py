@@ -15,6 +15,9 @@ from content.vpn import (BRIBE, CLIENTS, INTRO, PROTO_LABELS, REWARD_GOOD, REWAR
                          busted, dodged, no_sale, sale_good, sale_ok, vpn_chat)
 from db import storage
 from game.cars import flex_line
+from game.illegal_jobs import (VPN_LEVEL_THRESHOLDS, VPN_RANKS,
+                               reward_with_rank_bonus, successes_to_next_level,
+                               vpn_rank)
 from game.taxman import grant
 from keyboards import back_menu
 from utils.guards import ensure_private, with_owner
@@ -40,12 +43,35 @@ async def vpn_start(cb: CallbackQuery):
     tg_id = cb.from_user.id
     if not await storage.get_profile(tg_id):
         return await cb.answer("Сначала зарегистрируйся 😉", show_alert=True)
+    successes = await storage.player_stat(tg_id, "vpn_successes")
+    level, rank = vpn_rank(successes)
+    to_next = successes_to_next_level(VPN_LEVEL_THRESHOLDS, successes)
+    progression = []
+    for index, (name, needed) in enumerate(zip(VPN_RANKS, VPN_LEVEL_THRESHOLDS), start=1):
+        mark = "▶️" if index == level else "▪️"
+        requirement = "старт" if needed == 0 else f"{needed} успешных продаж"
+        progression.append(f"{mark} {index}. {name.name} — {requirement}")
+    next_line = "Максимальный уровень." if to_next is None else f"До следующего: <b>{to_next}</b> успешных продаж."
     rows = [
-        [InlineKeyboardButton(text="🌐 Встать на угол", callback_data="vpn:begin")],
-        [InlineKeyboardButton(text="⬅️ В меню", callback_data=with_owner("menu:main", tg_id))],
+        [InlineKeyboardButton(text="🌐 Начать смену", callback_data="vpn:begin")],
+        [InlineKeyboardButton(text="⬅️ К нелегальным работам",
+                              callback_data=with_owner("work:illegal", tg_id))],
+    ]
+    lines = [
+        INTRO,
+        "",
+        f"Ранг: <b>{level}. {rank.name}</b> · +{rank.bonus_pct}%",
+        f"Успешных продаж: <b>{successes}</b> · {next_line}",
+        f"Всего наторговал: <b>{await storage.player_stat(tg_id, 'vpn_won')} Z</b>",
+        f"Лучшая смена: <b>{await storage.player_stat(tg_id, 'vpn_best_score')} Z</b> · "
+        f"смен: <b>{await storage.player_stat(tg_id, 'vpn_games')}</b> · "
+        f"лысой поймал: <b>{await storage.player_stat(tg_id, 'vpn_busted')}</b>",
+        "",
+        "<b>Прогрессия:</b>",
+        *progression,
     ]
     # приходим с фото-экрана нелегалки — текст пересоздаст сообщение
-    await show_text_menu(cb.message, INTRO, _kb(rows))
+    await show_text_menu(cb.message, "\n".join(lines), _kb(rows))
     await cb.answer()
 
 
@@ -71,6 +97,8 @@ async def vpn_begin(cb: CallbackQuery):
         "clients": random.sample(CLIENTS, ROUNDS),
         "name": cb.from_user.full_name,
         "chat_id": cb.message.chat.id, "msg_id": cb.message.message_id,
+        "successful_sales": 0,
+        "successes_before": await storage.player_stat(tg_id, "vpn_successes"),
     }
     await cb.answer()
     await _next_round(cb.bot, tg_id)
@@ -111,6 +139,14 @@ async def _next_round(bot: Bot, tg_id: int, prefix: str = "") -> None:
                 rows)
 
 
+def _rank_reward(g: dict, base_reward: int) -> int:
+    """Удачная продажа сразу учитывает достигнутую ступень."""
+    next_successes = g["successes_before"] + g["successful_sales"] + 1
+    _, rank = vpn_rank(next_successes)
+    g["successful_sales"] += 1
+    return reward_with_rank_bonus(base_reward, rank.bonus_pct)
+
+
 @router.callback_query(F.data.startswith("vpn:sell:"))
 async def vpn_sell(cb: CallbackQuery, bot: Bot):
     if not await ensure_private(cb):
@@ -144,13 +180,15 @@ async def vpn_sell(cb: CallbackQuery, bot: Bot):
         prefix = no_sale() + "\n\n"
         await cb.answer()
     elif choice == kind:
-        g["score"] += REWARD_GOOD
-        prefix = sale_good(REWARD_GOOD) + "\n\n"
-        await cb.answer(f"✅ +{REWARD_GOOD} Z")
+        reward = _rank_reward(g, REWARD_GOOD)
+        g["score"] += reward
+        prefix = sale_good(reward) + "\n\n"
+        await cb.answer(f"✅ +{reward} Z")
     else:
-        g["score"] += REWARD_OK
-        prefix = sale_ok(REWARD_OK) + "\n\n"
-        await cb.answer(f"💸 +{REWARD_OK} Z")
+        reward = _rank_reward(g, REWARD_OK)
+        g["score"] += reward
+        prefix = sale_ok(reward) + "\n\n"
+        await cb.answer(f"💸 +{reward} Z")
 
     await _next_round(bot, tg_id, prefix)
 
@@ -163,12 +201,18 @@ async def _finish(bot: Bot, tg_id: int, prefix: str = "") -> None:
     if score:
         await grant(bot, tg_id, score, dirty=True)  # барыжный доход — грязный
         await storage.bump(tg_id, "vpn_won", score)
+        await storage.set_stat_max(tg_id, "vpn_best_score", score)
+    successes = g["successful_sales"]
+    if successes:
+        await storage.bump(tg_id, "vpn_successes", successes)
     await storage.bump(tg_id, "vpn_games")
 
     tail = "\n💥 Минус взятка лысому." if g["busted"] else ""
+    level, rank = vpn_rank(g["successes_before"] + successes)
     await _edit(bot, g,
                 f"{prefix}🌐 <b>Смена на углу окончена!</b>\n"
-                f"Наторговал: <b>{score} Z</b> (грязными){tail}",
+                f"Наторговал: <b>{score} Z</b> (грязными){tail}\n"
+                f"Ранг: <b>{level}. {rank.name}</b> · +{rank.bonus_pct}%",
                 back_menu(tg_id).inline_keyboard)
 
     mention = hlink(g["name"], f"tg://user?id={tg_id}")

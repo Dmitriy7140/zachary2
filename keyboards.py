@@ -1,6 +1,18 @@
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 
+def alternating_button_rows(buttons: list[InlineKeyboardButton]) -> list[list[InlineKeyboardButton]]:
+    """Разложить кнопки повторяющимся рисунком 2–2–1."""
+    rows = []
+    index = 0
+    widths = (2, 2, 1)
+    while index < len(buttons):
+        width = widths[len(rows) % len(widths)]
+        rows.append(buttons[index:index + width])
+        index += width
+    return rows
+
+
 def register_kb(nick: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[[

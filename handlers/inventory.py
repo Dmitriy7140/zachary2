@@ -16,15 +16,16 @@ from content.slime_items import DRANIK_EAT_TEXT, eat_slime_pie, eat_slime_pita
 from content.zhmyzhko import corn_throw, egg_smash
 from db import storage
 from handlers.business import do_self_employ
-from game.items import ITEMS
-from keyboards import back_menu
+from game.items import (INVENTORY_CATEGORIES, INVENTORY_CATEGORY_LABELS, ITEM_CATEGORY, ITEMS,
+                        categorized_inventory_items)
+from keyboards import alternating_button_rows, back_menu
 from utils.guards import ensure_owner, with_owner
 from utils.notify import announce
 from utils.photo import show_photo_menu, show_text_menu
 
-# то же фото, что в главном меню: переход туда-обратно меняет только подпись
-MAIN_PHOTO = "static/main.png"
-MAIN_PHOTO_META = "main_photo_id"
+# отдельный фон инвентаря; кэшируется независимо от главного меню
+MAIN_PHOTO = "static/inventory_backpack.png"
+MAIN_PHOTO_META = "inventory_backpack_photo_id"
 
 router = Router()
 
@@ -40,9 +41,9 @@ ACTIONS = {
     "rod": [("wave", "🎣 Помахать удочкой")],
     "egg": [("smash", "🥚 Разбить себе об лоб")],
     "corn": [("throw", "🗑 Выкинуть")],
-    "slime_pie": [("eat", "🥚 Попробовать съесть")],
-    "slime_pita": [("eat", "🌽 Попробовать... съесть")],
-    "slime_dranik": [("eat", "🥔 Попробовать? Съесть?")],
+    "slime_pie": [("eat", "🪨 Попробовать съесть")],
+    "slime_pita": [("eat", "🌮 Попробовать... съесть")],
+    "slime_dranik": [("eat", "🥯 Попробовать? Съесть?")],
 }
 
 
@@ -54,7 +55,23 @@ def _kb(rows) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-# --- список предметов ---
+def _category_buttons(tg_id: int) -> list[InlineKeyboardButton]:
+    return [
+        InlineKeyboardButton(
+            text=label,
+            callback_data=with_owner(f"invcat:{category}", tg_id),
+        )
+        for category, label in INVENTORY_CATEGORIES
+    ]
+
+
+def _item_button(key: str, qty: int, tg_id: int) -> InlineKeyboardButton:
+    item = ITEMS[key]
+    label = f"{item.emoji} {item.name}" + (f" ×{qty}" if item.max_qty > 1 else "")
+    return InlineKeyboardButton(text=label, callback_data=with_owner(f"invitem:{key}", tg_id))
+
+
+# --- список категорий ---
 @router.callback_query(F.data.startswith("menu:inventory:"))
 async def inventory(cb: CallbackQuery):
     if not await ensure_owner(cb):
@@ -63,40 +80,53 @@ async def inventory(cb: CallbackQuery):
     if not await storage.get_profile(tg_id):
         return await cb.answer("Сначала зарегистрируйся 😉", show_alert=True)
 
-    items = await storage.get_inventory(tg_id)
-    lottery_counts = await storage.get_lottery_ticket_counts(tg_id=tg_id)
-    buttons = []
-    for key, qty in items.items():
-        it = ITEMS.get(key)
-        if not it or qty <= 0:
-            continue
-        label = f"{it.emoji} {it.name}" + (f" ×{qty}" if it.max_qty > 1 else "")
-        buttons.append(InlineKeyboardButton(text=label,
-                                            callback_data=with_owner(f"invitem:{key}", tg_id)))
-    # Лотерейные билеты — виртуальные позиции из истории тиражей. Они не
-    # попадают в ITEMS/inventory, поэтому не продаются и не удаляются вместе
-    # с обычными предметами.
-    rows = []
-    if lottery_counts.active_tickets > 0:
-        rows.append([InlineKeyboardButton(
-            text=f"🎟 Лотерейные билетики ×{lottery_counts.active_tickets}",
-            callback_data=with_owner("lot:view", tg_id),
-        )])
-    if lottery_counts.expired_tickets > 0:
-        rows.append([InlineKeyboardButton(
-            text=f"🧾 Протухшие билетики ×{lottery_counts.expired_tickets}",
-            callback_data=with_owner("lot:expired", tg_id),
-        )])
-    # Обычные предметы — два столбца после полноширинных билетов.
-    rows.extend(buttons[i:i + 2] for i in range(0, len(buttons), 2))
+    buttons = _category_buttons(tg_id)
+    rows = alternating_button_rows(buttons)
     rows.append([InlineKeyboardButton(text="⬅️ В меню", callback_data=with_owner("menu:main", tg_id))])
 
-    has_lottery_tickets = lottery_counts.active_tickets > 0 or lottery_counts.expired_tickets > 0
-    text = (
-        "🎒 <b>Инвентарь</b>\nВыбери предмет:"
-        if buttons or has_lottery_tickets
-        else "🎒 <b>Инвентарь</b>\n\nпусто 🕸"
-    )
+    text = "🎒 <b>Инвентарь</b>\nВыбери категорию:"
+    await show_photo_menu(cb.message, MAIN_PHOTO, MAIN_PHOTO_META, text, _kb(rows))
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("invcat:"))
+async def inventory_category(cb: CallbackQuery):
+    if not await ensure_owner(cb):
+        return
+    tg_id = cb.from_user.id
+    if not await storage.get_profile(tg_id):
+        return await cb.answer("Сначала зарегистрируйся 😉", show_alert=True)
+    parts = (cb.data or "").split(":")
+    category = parts[1] if len(parts) >= 2 else ""
+    if category not in INVENTORY_CATEGORY_LABELS:
+        return await cb.answer("Такого раздела нет", show_alert=True)
+
+    items = categorized_inventory_items(await storage.get_inventory(tg_id))
+    lottery_counts = await storage.get_lottery_ticket_counts(tg_id=tg_id)
+    buttons = []
+    if category == "sins":
+        # Билеты — виртуальные позиции из истории тиражей. Они не попадают в
+        # ITEMS/inventory, поэтому не продаются и не удаляются с предметами.
+        if lottery_counts.active_tickets > 0:
+            buttons.append(InlineKeyboardButton(
+                text=f"🎟 Лотерейные билетики ×{lottery_counts.active_tickets}",
+                callback_data=with_owner("lot:view", tg_id),
+            ))
+        if lottery_counts.expired_tickets > 0:
+            buttons.append(InlineKeyboardButton(
+                text=f"🧾 Протухшие билетики ×{lottery_counts.expired_tickets}",
+                callback_data=with_owner("lot:expired", tg_id),
+            ))
+    buttons.extend(_item_button(key, qty, tg_id) for key, qty in items[category])
+
+    rows = alternating_button_rows(buttons)
+    rows.append([InlineKeyboardButton(
+        text="⬅️ К категориям",
+        callback_data=with_owner("menu:inventory", tg_id),
+    )])
+    text = f"🎒 <b>{INVENTORY_CATEGORY_LABELS[category]}</b>"
+    if not buttons:
+        text += "\n\nпусто 🕸"
     await show_photo_menu(cb.message, MAIN_PHOTO, MAIN_PHOTO_META, text, _kb(rows))
     await cb.answer()
 
@@ -118,7 +148,11 @@ async def item_menu(cb: CallbackQuery):
         actions.append(("selfemploy", "📱 Оформить самозанятость — 1000 Z"))
     rows = [[InlineKeyboardButton(text=label, callback_data=with_owner(f"invact:{key}:{act}", tg_id))]
             for act, label in actions]
-    rows.append([InlineKeyboardButton(text="⬅️ К инвентарю", callback_data=with_owner("menu:inventory", tg_id))])
+    category = ITEM_CATEGORY[key]
+    rows.append([InlineKeyboardButton(
+        text="⬅️ К категории",
+        callback_data=with_owner(f"invcat:{category}", tg_id),
+    )])
     tail = "\nЧто делаем?" if actions else "\nС этим предметом ничего не сделать."
     await show_photo_menu(cb.message, MAIN_PHOTO, MAIN_PHOTO_META,
                           f"{it.emoji} <b>{it.name}</b>{tail}", _kb(rows))

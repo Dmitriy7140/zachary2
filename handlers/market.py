@@ -1,9 +1,10 @@
 """Рынок: «Продажа» — поставка товаров в общий сток, «Покупка» — стакан.
 
-Продажа: лот продаётся ВЕСЬ разом через (цена − минимум) × 10 минут
-(по минималке — мгновенно). Суммарно в активных лотах не больше вместимости
-палеты игрока. Проданное попадает в market_stock с наценкой 10% и доступно другим
-игрокам в «Покупке» — игроки сами привозят товары на рынок.
+Продажа: лот продаётся ВЕСЬ разом. Минимальная цена мгновенна, максимальная
+всегда ждёт 3ч 20м, а промежуточный срок линейно зависит от диапазона конкретного
+продукта. Суммарно в активных лотах не больше вместимости палеты игрока.
+Проданное попадает в market_stock с наценкой 10% и доступно другим игрокам в
+«Покупке» — игроки сами привозят товары на рынок.
 """
 from datetime import datetime, timedelta
 
@@ -16,7 +17,7 @@ from aiogram.utils.markdown import hlink
 from content.market import market_vibe
 from content.zhmyzhko import proletarian
 from db import storage
-from game.items import ITEMS, sellable_items
+from game.items import ITEMS, market_wait_minutes, sellable_items
 from game.market import (MARKET_PALLET_BASE_LIMIT, MARKET_PALLET_UPGRADE_PRICE,
                          MARKET_PALLET_UPGRADED_LIMIT, buy_price)
 from game.taxman import grant
@@ -206,7 +207,7 @@ async def market_sell(cb: CallbackQuery, state: FSMContext):
     tg_id = cb.from_user.id
     key = cb.data.split(":")[2]
     it = ITEMS.get(key)
-    if not it or it.sell_minutes_per_z <= 0:
+    if not it or it.sell_max <= it.sell_min:
         return await cb.answer("Это не продаётся", show_alert=True)
     have = await storage.get_item_qty(tg_id, key)
     if have < 1:
@@ -251,7 +252,7 @@ async def market_qty(cb: CallbackQuery, state: FSMContext):
     _, _, key, qty_raw = cb.data.split(":")
     qty = int(qty_raw)
     it = ITEMS.get(key)
-    if not it or it.sell_minutes_per_z <= 0:
+    if not it or it.sell_max <= it.sell_min:
         return await cb.answer("Это не продаётся", show_alert=True)
     if qty < 1 or await storage.get_item_qty(tg_id, key) < qty:
         return await cb.answer("Столько уже нет", show_alert=True)
@@ -262,14 +263,15 @@ async def _ask_price(cb: CallbackQuery, state: FSMContext, it, qty: int) -> None
     await state.set_state(MarketStates.pricing)
     await state.update_data(item=it.key, qty=qty,
                             chat_id=cb.message.chat.id, msg_id=cb.message.message_id)
-    max_min = (it.sell_max - it.sell_min) * it.sell_minutes_per_z
+    max_wait = market_wait_minutes(it, it.sell_max)
     cnt = f" ×{qty}" if qty > 1 else ""
     await _show(
         cb.message,
         f"{it.emoji} <b>{it.name}</b>{cnt}\n"
         f"Цена ЗА ШТУКУ {it.sell_min}–{it.sell_max} Z: {it.sell_min} = моментально, "
-        f"каждый +1 Z = +{it.sell_minutes_per_z} мин ожидания "
-        f"(до ~{max_min // 60}ч при {it.sell_max} Z). Лот продаётся весь разом.\n"
+        f"при {it.sell_max} = {max_wait // 60}ч {max_wait % 60}м. "
+        "Для промежуточной цены срок считается по диапазону этого продукта. "
+        "Лот продаётся весь разом.\n"
         "Напиши цену за штуку:")
     await cb.answer()
 
@@ -300,7 +302,7 @@ async def market_price(msg: Message, state: FSMContext, bot: Bot):
         return await finish(f"❌ Цена должна быть {it.sell_min}–{it.sell_max} Z — отменено.")
     cnt = f" ×{qty}" if qty > 1 else ""
     total = price * qty
-    minutes = (price - it.sell_min) * it.sell_minutes_per_z
+    minutes = market_wait_minutes(it, price)
     if minutes <= 0:
         # Мгновенная продажа не занимает палету: предмет сразу уезжает в стакан.
         if not await storage.remove_item(tg_id, it.key, qty):

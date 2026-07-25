@@ -67,6 +67,19 @@ IllegalBusinessProgressStatus = Literal[
 IllegalBusinessCollectionStatus = Literal[
     "ok", "empty", "not_owned", "no_profile", "hour_due", "upkeep_due",
 ]
+BusinessRobberyStatus = Literal[
+    "robbed_laundered",
+    "robbed_products",
+    "robbed_illegal_cash",
+    "empty",
+    "cooldown",
+    "business_cooldown",
+    "no_crowbar",
+    "target_missing",
+    "secret_locked",
+    "illegal_due",
+    "no_profile",
+]
 
 CubeEnterStatus = Literal[
     "entered",
@@ -147,6 +160,31 @@ class IllegalBusinessCollection:
     amount: int = 0
     balance_before: int | None = None
     balance_after: int | None = None
+
+
+@dataclass(frozen=True)
+class BusinessRobberyTarget:
+    """Доступная конкретному вору цель налёта."""
+
+    owner_tg_id: int
+    owner_nick: str
+    biz: str
+    level: int
+    custom_name: str | None
+    is_illegal: bool
+    parent_biz: str | None
+
+
+@dataclass(frozen=True)
+class BusinessRobberyResult:
+    """Зафиксированный исход одного налёта без Telegram side effects."""
+
+    status: BusinessRobberyStatus
+    amount: int = 0
+    products: tuple[tuple[str, int], ...] = ()
+    balance_before: int | None = None
+    balance_after: int | None = None
+    cooldown_until: str | None = None
 
 
 @dataclass(frozen=True)
@@ -603,6 +641,26 @@ async def init() -> None:
             amount   INTEGER,
             ready_at TEXT
         );
+
+        -- Успешный налёт закрывает конкретное дело для всех воров на сутки.
+        CREATE TABLE IF NOT EXISTS business_raid_cooldowns (
+            owner_tg_id INTEGER NOT NULL,
+            biz         TEXT NOT NULL,
+            until       TEXT NOT NULL,
+            PRIMARY KEY (owner_tg_id, biz)
+        );
+
+        -- Успешный налёт на легальную часть открывает этому вору тайную
+        -- часть того же владельца. Это история доступа, не одноразовый lock.
+        CREATE TABLE IF NOT EXISTS business_robbery_access (
+            thief_tg_id INTEGER NOT NULL,
+            owner_tg_id INTEGER NOT NULL,
+            parent_biz  TEXT NOT NULL,
+            robbed_at   TEXT NOT NULL,
+            PRIMARY KEY (thief_tg_id, owner_tg_id, parent_biz)
+        );
+        CREATE INDEX IF NOT EXISTS business_robbery_access_target_idx
+            ON business_robbery_access (thief_tg_id, owner_tg_id, parent_biz);
 
         -- Заказы слизней: каждая штука — отдельная durable-задача.  После
         -- ready_at задача становится ready, а delivered сохраняется как
@@ -2744,6 +2802,16 @@ async def bump(tg_id: int, key: str, amount: int = 1) -> None:
     await _db.commit()
 
 
+async def set_stat_max(tg_id: int, key: str, value: int) -> None:
+    """Сохранить максимум статистики игрока, не понижая прежний рекорд."""
+    await _db.execute(
+        """INSERT INTO stats (tg_id, key, value) VALUES (?, ?, ?)
+           ON CONFLICT (tg_id, key) DO UPDATE SET value = MAX(stats.value, excluded.value)""",
+        (tg_id, key, value),
+    )
+    await _db.commit()
+
+
 async def stat_sum(key: str) -> int:
     cur = await _db.execute("SELECT COALESCE(SUM(value), 0) FROM stats WHERE key = ?", (key,))
     return (await cur.fetchone())[0]
@@ -2900,6 +2968,40 @@ async def list_businesses(tg_id: int) -> list[tuple]:
         (tg_id,),
     )
     return await cur.fetchall()
+
+
+def _business_robbery_target(row: tuple) -> BusinessRobberyTarget:
+    return BusinessRobberyTarget(
+        owner_tg_id=row[0],
+        owner_nick=row[1],
+        biz=row[2],
+        level=row[3],
+        custom_name=row[4],
+        is_illegal=bool(row[5]),
+        parent_biz=row[6],
+    )
+
+
+async def list_business_robbery_targets(thief_tg_id: int) -> list[BusinessRobberyTarget]:
+    """Все легальные цели и открытые вору тайные дела других владельцев."""
+    cur = await _db.execute(
+        """SELECT b.tg_id, p.nick, b.biz, b.level, b.custom_name, 0, NULL
+               FROM businesses b
+               JOIN profiles p ON p.tg_id = b.tg_id
+              WHERE b.tg_id != ?
+             UNION ALL
+             SELECT i.tg_id, p.nick, i.biz, i.level, NULL, 1, i.parent_biz
+               FROM illegal_businesses i
+               JOIN profiles p ON p.tg_id = i.tg_id
+               JOIN business_robbery_access a
+                 ON a.thief_tg_id = ?
+                AND a.owner_tg_id = i.tg_id
+                AND a.parent_biz = i.parent_biz
+              WHERE i.tg_id != ?
+             ORDER BY 2 COLLATE NOCASE, 6, 3""",
+        (thief_tg_id, thief_tg_id, thief_tg_id),
+    )
+    return [_business_robbery_target(row) for row in await cur.fetchall()]
 
 
 async def buy_business_atomic(
@@ -3897,6 +3999,242 @@ async def theft_cooldown_left(tg_id: int) -> int:
         return 0
     left = (datetime.fromisoformat(row[0]) - datetime.now()).total_seconds()
     return max(0, int(left))
+
+
+async def rob_business_atomic(
+    thief_tg_id: int,
+    owner_tg_id: int,
+    biz: str,
+    *,
+    now_iso: str,
+    success_cooldown_until: str,
+    empty_cooldown_until: str,
+    illegal_next_hour_at: str,
+    legal_products: tuple[tuple[str, int], ...] = (),
+) -> BusinessRobberyResult:
+    """Атомарно обнести одно предприятие и поставить все нужные ограничения.
+
+    Легальная контора сначала отдаёт всю активную сумму отмыва. Если отмыва
+    нет, забирается подходящая продукция из inventory цели в пределах места у
+    вора. Теневое дело отдаёт всю свою кассу. Любая успешная кража закрывает
+    цель и самого вора на сутки; пустой налёт — только на час.
+    """
+    if thief_tg_id == owner_tg_id:
+        return BusinessRobberyResult("target_missing")
+
+    async with _economy_lock:
+        connection = _economy_connection()
+        await connection.execute("BEGIN IMMEDIATE")
+        try:
+            cur = await connection.execute(
+                "SELECT zbucks, COALESCE(dirty, 0) FROM profiles WHERE tg_id = ?",
+                (thief_tg_id,),
+            )
+            thief_profile = await cur.fetchone()
+            if not thief_profile:
+                await connection.rollback()
+                return BusinessRobberyResult("no_profile")
+            cur = await connection.execute(
+                "SELECT 1 FROM profiles WHERE tg_id = ?", (owner_tg_id,)
+            )
+            if not await cur.fetchone():
+                await connection.rollback()
+                return BusinessRobberyResult("target_missing")
+            cur = await connection.execute(
+                "SELECT qty FROM inventory WHERE tg_id = ? AND item = 'crowbar'",
+                (thief_tg_id,),
+            )
+            crowbar = await cur.fetchone()
+            if not crowbar or crowbar[0] < 1:
+                await connection.rollback()
+                return BusinessRobberyResult("no_crowbar")
+            cur = await connection.execute(
+                "SELECT used_at FROM cooldowns WHERE tg_id = ? AND game = 'business_robbery'",
+                (thief_tg_id,),
+            )
+            cooldown = await cur.fetchone()
+            if cooldown and cooldown[0] > now_iso:
+                await connection.rollback()
+                return BusinessRobberyResult("cooldown", cooldown_until=cooldown[0])
+            cur = await connection.execute(
+                "SELECT until FROM business_raid_cooldowns WHERE owner_tg_id = ? AND biz = ?",
+                (owner_tg_id, biz),
+            )
+            raid_cooldown = await cur.fetchone()
+            if raid_cooldown and raid_cooldown[0] > now_iso:
+                await connection.rollback()
+                return BusinessRobberyResult(
+                    "business_cooldown", cooldown_until=raid_cooldown[0],
+                )
+
+            cur = await connection.execute(
+                "SELECT 1 FROM businesses WHERE tg_id = ? AND biz = ?", (owner_tg_id, biz)
+            )
+            is_legal = bool(await cur.fetchone())
+            amount = 0
+            products: list[tuple[str, int]] = []
+            status: BusinessRobberyStatus
+            balance_before = balance_after = None
+
+            if is_legal:
+                cur = await connection.execute(
+                    "SELECT COALESCE(SUM(amount), 0) FROM laundering WHERE tg_id = ? AND biz = ?",
+                    (owner_tg_id, biz),
+                )
+                amount = (await cur.fetchone())[0]
+                if amount > 0:
+                    await connection.execute(
+                        "DELETE FROM laundering WHERE tg_id = ? AND biz = ?", (owner_tg_id, biz)
+                    )
+                    balance_before = thief_profile[0]
+                    balance_after = balance_before + amount
+                    await connection.execute(
+                        """UPDATE profiles
+                              SET zbucks = zbucks + ?,
+                                  dirty = MIN(zbucks + ?, COALESCE(dirty, 0) + ?)
+                            WHERE tg_id = ?""",
+                        (amount, amount, amount, thief_tg_id),
+                    )
+                    status = "robbed_laundered"
+                else:
+                    for item, max_qty in legal_products:
+                        if max_qty <= 0:
+                            continue
+                        cur = await connection.execute(
+                            "SELECT qty FROM inventory WHERE tg_id = ? AND item = ?",
+                            (thief_tg_id, item),
+                        )
+                        thief_item = await cur.fetchone()
+                        capacity = max_qty - (thief_item[0] if thief_item else 0)
+                        if capacity <= 0:
+                            continue
+                        cur = await connection.execute(
+                            "SELECT qty FROM inventory WHERE tg_id = ? AND item = ?",
+                            (owner_tg_id, item),
+                        )
+                        owner_item = await cur.fetchone()
+                        taken = min(owner_item[0] if owner_item else 0, capacity)
+                        if taken <= 0:
+                            continue
+                        await connection.execute(
+                            "UPDATE inventory SET qty = qty - ? WHERE tg_id = ? AND item = ?",
+                            (taken, owner_tg_id, item),
+                        )
+                        await connection.execute(
+                            "DELETE FROM inventory WHERE tg_id = ? AND item = ? AND qty <= 0",
+                            (owner_tg_id, item),
+                        )
+                        await connection.execute(
+                            """INSERT INTO inventory (tg_id, item, qty) VALUES (?, ?, ?)
+                               ON CONFLICT(tg_id, item) DO UPDATE SET qty = inventory.qty + excluded.qty""",
+                            (thief_tg_id, item, taken),
+                        )
+                        products.append((item, taken))
+                    status = "robbed_products" if products else "empty"
+            else:
+                cur = await connection.execute(
+                    """SELECT parent_biz, accrued, next_hour_at, upkeep_at, paused
+                         FROM illegal_businesses WHERE tg_id = ? AND biz = ?""",
+                    (owner_tg_id, biz),
+                )
+                illegal = await cur.fetchone()
+                if not illegal:
+                    await connection.rollback()
+                    return BusinessRobberyResult("target_missing")
+                parent_biz, amount, next_hour_at, upkeep_at, paused = illegal
+                cur = await connection.execute(
+                    """SELECT 1 FROM business_robbery_access
+                         WHERE thief_tg_id = ? AND owner_tg_id = ? AND parent_biz = ?""",
+                    (thief_tg_id, owner_tg_id, parent_biz),
+                )
+                if not await cur.fetchone():
+                    await connection.rollback()
+                    return BusinessRobberyResult("secret_locked")
+                if upkeep_at <= now_iso or (not paused and next_hour_at <= now_iso):
+                    await connection.rollback()
+                    return BusinessRobberyResult("illegal_due")
+                if amount > 0:
+                    balance_before = thief_profile[0]
+                    balance_after = balance_before + amount
+                    await connection.execute(
+                        """UPDATE profiles
+                              SET zbucks = zbucks + ?,
+                                  dirty = MIN(zbucks + ?, COALESCE(dirty, 0) + ?)
+                            WHERE tg_id = ?""",
+                        (amount, amount, amount, thief_tg_id),
+                    )
+                    await connection.execute(
+                        """UPDATE illegal_businesses
+                              SET stage = 0, accrued = 0, next_hour_at = ?, revision = revision + 1
+                            WHERE tg_id = ? AND biz = ?""",
+                        (illegal_next_hour_at, owner_tg_id, biz),
+                    )
+                    status = "robbed_illegal_cash"
+                else:
+                    status = "empty"
+
+            if status == "empty":
+                await connection.execute(
+                    """INSERT INTO cooldowns (tg_id, game, used_at)
+                       VALUES (?, 'business_robbery', ?)
+                       ON CONFLICT(tg_id, game) DO UPDATE SET used_at = excluded.used_at""",
+                    (thief_tg_id, empty_cooldown_until),
+                )
+                await connection.commit()
+                return BusinessRobberyResult("empty", cooldown_until=empty_cooldown_until)
+
+            await connection.execute(
+                """INSERT INTO cooldowns (tg_id, game, used_at)
+                   VALUES (?, 'business_robbery', ?)
+                   ON CONFLICT(tg_id, game) DO UPDATE SET used_at = excluded.used_at""",
+                (thief_tg_id, success_cooldown_until),
+            )
+            await connection.execute(
+                """INSERT INTO business_raid_cooldowns (owner_tg_id, biz, until)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(owner_tg_id, biz) DO UPDATE SET until = excluded.until""",
+                (owner_tg_id, biz, success_cooldown_until),
+            )
+            if is_legal:
+                await connection.execute(
+                    """INSERT INTO business_robbery_access
+                       (thief_tg_id, owner_tg_id, parent_biz, robbed_at)
+                       VALUES (?, ?, ?, ?)
+                       ON CONFLICT(thief_tg_id, owner_tg_id, parent_biz)
+                       DO UPDATE SET robbed_at = excluded.robbed_at""",
+                    (thief_tg_id, owner_tg_id, biz, now_iso),
+                )
+            await connection.execute(
+                "UPDATE profiles SET thefts = thefts + 1 WHERE tg_id = ?", (thief_tg_id,)
+            )
+            await connection.execute(
+                """INSERT INTO stats (tg_id, key, value) VALUES (?, 'business_robberies', 1)
+                   ON CONFLICT(tg_id, key) DO UPDATE SET value = value + 1""",
+                (thief_tg_id,),
+            )
+            if amount > 0:
+                await connection.execute(
+                    """INSERT INTO stats (tg_id, key, value) VALUES (?, 'thief_won', ?)
+                       ON CONFLICT(tg_id, key) DO UPDATE SET value = value + excluded.value""",
+                    (thief_tg_id, amount),
+                )
+                await connection.execute(
+                    """INSERT INTO stats (tg_id, key, value) VALUES (?, 'thief_best_score', ?)
+                       ON CONFLICT(tg_id, key) DO UPDATE SET value = MAX(stats.value, excluded.value)""",
+                    (thief_tg_id, amount),
+                )
+            await connection.commit()
+            return BusinessRobberyResult(
+                status,
+                amount=amount,
+                products=tuple(products),
+                balance_before=balance_before,
+                balance_after=balance_after,
+                cooldown_until=success_cooldown_until,
+            )
+        except BaseException:
+            await connection.rollback()
+            raise
 
 
 # --- глобальный текстовый лабиринт «Куб» ---

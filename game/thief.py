@@ -1,5 +1,7 @@
-"""Математика работы «Вор»."""
+"""Математика и правила работы «Вор»."""
 import random
+
+from game.items import ITEMS
 
 # Сколько успешных краж нужно для уровней 1..5
 THEFT_THRESHOLDS = [0, 5, 15, 30, 50]
@@ -7,6 +9,19 @@ THEFT_THRESHOLDS = [0, 5, 15, 30, 50]
 QUALITIES = ["КУ", "ВУ", "НОУ", "СБ"]          # от лучшей к худшей
 PROFIT_PCT = {"КУ": 90, "ВУ": 70, "НОУ": 50, "СБ": 30}  # % от состояния цели
 MIN_TARGET_WEALTH = 20
+
+# Ограбление предприятий — отдельная ступень работы, не замена щипачеству.
+BUSINESS_ROBBERY_MIN_LEVEL = 3
+BUSINESS_ROBBERY_COOLDOWN_HOURS = 24
+BUSINESS_ROBBERY_EMPTY_COOLDOWN_HOURS = 1
+CROWBAR_ITEM = "crowbar"
+
+# Рынок вынимает выставленный товар из inventory, поэтому здесь остаётся
+# только продукция, которая реально лежит у владельца предприятия.
+BUSINESS_ROBBERY_PRODUCTS = {
+    "mosquito_farm": ("egg", "corn", "potato"),
+    "slug_bistro": ("slime_pie", "slime_pita", "slime_dranik"),
+}
 
 
 def max_steal(level: int) -> int:
@@ -38,3 +53,8 @@ def roll_quality(level: int) -> str:
 
 def steal_amount(quality: str, target_wealth: int, level: int) -> int:
     return min(int(target_wealth * PROFIT_PCT[quality] / 100), max_steal(level))
+
+
+def business_robbery_products(biz: str) -> tuple[tuple[str, int], ...]:
+    """Какие товары налётчик может вынести у конкретного легального дела."""
+    return tuple((item, ITEMS[item].max_qty) for item in BUSINESS_ROBBERY_PRODUCTS.get(biz, ()))

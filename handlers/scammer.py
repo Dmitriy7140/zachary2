@@ -5,17 +5,21 @@ from datetime import datetime, timedelta
 from aiogram import Bot, F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from aiogram.utils.markdown import hlink
 
 from content.scammer import CHARACTERS, hint, scam_chat
 from db import storage
 from game.cars import flex_line
+from game.illegal_jobs import (SCAMMER_LEVEL_THRESHOLDS, SCAMMER_RANKS,
+                               reward_with_rank_bonus, scammer_rank,
+                               successes_to_next_level)
 from game.scammer import ATTEMPTS, COOLDOWN_MIN, ROUNDS, WINDOW, WINDOW_CROSS, reward
 from game.taxman import grant
 from keyboards import back_menu
-from utils.guards import ensure_private
+from utils.guards import ensure_private, with_owner
 from utils.notify import announce
+from utils.photo import show_text_menu
 
 router = Router()
 _games: dict[int, dict] = {}
@@ -23,6 +27,49 @@ _games: dict[int, dict] = {}
 
 class ScamStates(StatesGroup):
     attempt = State()
+
+
+def _kb(rows) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@router.callback_query(F.data == "scammer:menu")
+async def scammer_menu(cb: CallbackQuery):
+    if not await ensure_private(cb):
+        return
+    tg_id = cb.from_user.id
+    if not await storage.get_profile(tg_id):
+        return await cb.answer("Сначала зарегистрируйся 😉", show_alert=True)
+
+    successes = await storage.player_stat(tg_id, "scam_successes")
+    level, rank = scammer_rank(successes)
+    to_next = successes_to_next_level(SCAMMER_LEVEL_THRESHOLDS, successes)
+    progression = []
+    for index, (name, needed) in enumerate(zip(SCAMMER_RANKS, SCAMMER_LEVEL_THRESHOLDS), start=1):
+        mark = "▶️" if index == level else "▪️"
+        requirement = "старт" if needed == 0 else f"{needed} успешных обзвонов"
+        progression.append(f"{mark} {index}. {name.name} — {requirement}")
+    next_line = "Максимальный уровень." if to_next is None else f"До следующего: <b>{to_next}</b> успешных обзвонов."
+    lines = [
+        "📞 <b>Телефонный мошенник</b>",
+        "Звони доверчивым гражданам и угадывай, сколько слов нужно сказать.",
+        "",
+        f"Ранг: <b>{level}. {rank.name}</b> · +{rank.bonus_pct}%",
+        f"Успешных обзвонов: <b>{successes}</b> · {next_line}",
+        f"Всего наварил: <b>{await storage.player_stat(tg_id, 'scam_won')} Z</b>",
+        f"Лучший обзвон: <b>{await storage.player_stat(tg_id, 'scam_best_score')} Z</b> · "
+        f"сеансов: <b>{await storage.player_stat(tg_id, 'scam_games')}</b>",
+        "",
+        "<b>Прогрессия:</b>",
+        *progression,
+    ]
+    rows = [
+        [InlineKeyboardButton(text="📞 Начать обзвон", callback_data="scammer:start")],
+        [InlineKeyboardButton(text="⬅️ К нелегальным работам",
+                              callback_data=with_owner("work:illegal", tg_id))],
+    ]
+    await show_text_menu(cb.message, "\n".join(lines), _kb(rows))
+    await cb.answer()
 
 
 @router.callback_query(F.data == "scammer:start")
@@ -49,7 +96,8 @@ async def scammer_start(cb: CallbackQuery, state: FSMContext, bot: Bot):
         "round": 0, "score": 0, "chars": random.sample(list(CHARACTERS), ROUNDS),
         "name": cb.from_user.full_name, "chat_id": cb.message.chat.id,
         "msg_id": cb.message.message_id, "target": None, "best": None, "attempts": 0,
-        "window": window,
+        "window": window, "successful_calls": 0,
+        "successes_before": await storage.player_stat(tg_id, "scam_successes"),
     }
     await cb.answer()
     await _next_round(bot, tg_id, state)
@@ -82,6 +130,14 @@ async def _next_round(bot: Bot, tg_id: int, state: FSMContext, prefix: str = "")
                 f"Попыток: {ATTEMPTS}.")
 
 
+def _rank_reward(g: dict, base_reward: int) -> int:
+    """Удачный звонок сразу учитывает достигнутую ступень."""
+    next_successes = g["successes_before"] + g["successful_calls"] + 1
+    _, rank = scammer_rank(next_successes)
+    g["successful_calls"] += 1
+    return reward_with_rank_bonus(base_reward, rank.bonus_pct)
+
+
 @router.message(ScamStates.attempt)
 async def scam_attempt(msg: Message, state: FSMContext, bot: Bot):
     tg_id = msg.from_user.id
@@ -95,7 +151,7 @@ async def scam_attempt(msg: Message, state: FSMContext, bot: Bot):
     diff = abs(count - target)
 
     if diff == 0:
-        r = reward(0)
+        r = _rank_reward(g, reward(0))
         g["score"] += r
         return await _next_round(bot, tg_id, state,
                                  prefix=f"🎯 <b>{character} поверил каждому слову!</b> "
@@ -108,7 +164,8 @@ async def scam_attempt(msg: Message, state: FSMContext, bot: Bot):
                            f"📞 <b>{character}</b>\nТы написал: {count} слов.\n"
                            f"{hint(count, target, character)}\nПопыток осталось: {g['attempts']}.")
 
-    r = reward(g["best"], g["window"])
+    base_reward = reward(g["best"], g["window"])
+    r = _rank_reward(g, base_reward) if base_reward else 0
     g["score"] += r
     if r > 0:
         prefix = f"💸 {character} поколебался и отдал <b>{r} Z</b> (мимо на {g['best']}).\n\n"
@@ -126,7 +183,15 @@ async def _finish(bot: Bot, tg_id: int, state: FSMContext, prefix: str = "") -> 
     if score:
         await grant(bot, tg_id, score, dirty=True)  # развод по телефону — грязные
         await storage.bump(tg_id, "scam_won", score)
-    await _say(bot, g, f"{prefix}📞 <b>Обзвон окончен!</b>\nНаварил: <b>{score} Z</b>",
+        await storage.set_stat_max(tg_id, "scam_best_score", score)
+    successes = g["successful_calls"]
+    if successes:
+        await storage.bump(tg_id, "scam_successes", successes)
+    await storage.bump(tg_id, "scam_games")
+    level, rank = scammer_rank(g["successes_before"] + successes)
+    await _say(bot, g,
+                f"{prefix}📞 <b>Обзвон окончен!</b>\nНаварил: <b>{score} Z</b>\n"
+                f"Ранг: <b>{level}. {rank.name}</b> · +{rank.bonus_pct}%",
                 back_menu(tg_id))
     mention = hlink(g["name"], f"tg://user?id={tg_id}")
     # в тред — без сумм, только масштаб навара

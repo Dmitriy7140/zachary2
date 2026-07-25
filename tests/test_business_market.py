@@ -9,7 +9,7 @@ from pathlib import Path
 from config import config
 from db import storage
 from game import business
-from game.items import ITEMS, sellable_items
+from game.items import ITEMS, MARKET_MAX_WAIT_MINUTES, market_wait_minutes, sellable_items
 
 
 class _StorageCase(unittest.IsolatedAsyncioTestCase):
@@ -61,8 +61,9 @@ class ItemRegistryTests(unittest.TestCase):
             self.assertEqual(name, item.name)
             self.assertEqual(99, item.max_qty)
             self.assertIsNone(item.price)
-            self.assertEqual((low, high, 10),
-                             (item.sell_min, item.sell_max, item.sell_minutes_per_z))
+            self.assertEqual((low, high), (item.sell_min, item.sell_max))
+            self.assertEqual(0, market_wait_minutes(item, low))
+            self.assertEqual(MARKET_MAX_WAIT_MINUTES, market_wait_minutes(item, high))
             self.assertIn(key, sellable)
 
 
