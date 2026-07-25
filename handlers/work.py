@@ -8,6 +8,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from aiogram.utils.markdown import hlink
 
 from content import thief as txt
+from content.zhmyzhko import proletarian
 from db import storage
 from game.business import business_card_name, illegal_business_card_name, settle_illegal_timeline
 from game.cashier import level_name as cashier_level_name
@@ -396,8 +397,12 @@ async def thief_business_yes(cb: CallbackQuery, bot: Bot):
     await cb.answer()
     await announce(
         bot,
-        f"🏢 {thief} обнёс {name} у {html.escape(target.owner_nick)} и вынес {loot}.\n"
-        f"{proletarian()}",
+        txt.business_robbery_chat(
+            thief=thief,
+            owner=html.escape(target.owner_nick),
+            business=name,
+            loot=loot,
+        ),
     )
 
 

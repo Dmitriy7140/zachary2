@@ -6,10 +6,26 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from config import config
+from content.thief import business_robbery_chat
 from db import storage
 from game.business import BIZ_ILLEGAL_MOSQUITO, BIZ_MOSQUITO, BIZ_SLUGS
 from game.items import ITEMS
 from game.thief import business_robbery_products
+
+
+class BusinessRobberyAnnouncementTests(unittest.TestCase):
+    def test_thread_message_names_every_participant_and_the_loot(self) -> None:
+        message = business_robbery_chat(
+            thief='<a href="tg://user?id=1">Ворюга</a>',
+            owner="Барыга",
+            business="АО Мрачные Сосалы",
+            loot="<b>1 500 Z</b>",
+        )
+
+        self.assertIn("Ворюга", message)
+        self.assertIn("Барыга", message)
+        self.assertIn("АО Мрачные Сосалы", message)
+        self.assertIn("1 500 Z", message)
 
 
 class BusinessRobberyStorageTests(unittest.IsolatedAsyncioTestCase):
