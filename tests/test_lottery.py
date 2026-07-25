@@ -89,6 +89,10 @@ class LotteryMigrationTests(_TemporaryStorageCase):
             {"xp", "level", "thefts", "honest", "dirty", "self_employed"}
             <= profile_columns
         )
+        ticket_columns = {
+            row[1] for row in await self._fetchall("PRAGMA table_info(lottery_tickets)")
+        }
+        self.assertIn("purchase_request_key", ticket_columns)
         lottery_tables = {
             row[0]
             for row in await self._fetchall(
@@ -97,11 +101,96 @@ class LotteryMigrationTests(_TemporaryStorageCase):
             )
         }
         self.assertEqual(
-            {"lottery_rounds", "lottery_tickets", "lottery_notifications"},
+            {
+                "lottery_rounds",
+                "lottery_tickets",
+                "lottery_purchase_requests",
+                "lottery_notifications",
+            },
             lottery_tables,
         )
         self.assertEqual(
             (1,), await self._fetchone("SELECT COUNT(*) FROM lottery_rounds")
+        )
+
+    async def test_legacy_ticket_request_remains_idempotent_after_migration(self) -> None:
+        legacy = sqlite3.connect(config.db_path)
+        legacy.executescript(
+            """
+            CREATE TABLE profiles (
+                tg_id      INTEGER PRIMARY KEY,
+                username   TEXT,
+                nick       TEXT UNIQUE,
+                zbucks     INTEGER DEFAULT 0,
+                created_at TEXT DEFAULT (datetime('now'))
+            );
+            CREATE TABLE lottery_rounds (
+                id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+                starts_at             TEXT NOT NULL,
+                closes_at             TEXT NOT NULL,
+                status                TEXT NOT NULL DEFAULT 'open',
+                active_slot           INTEGER UNIQUE,
+                ticket_price          INTEGER NOT NULL,
+                fee_bps               INTEGER NOT NULL,
+                ticket_count          INTEGER,
+                gross_pool            INTEGER,
+                house_cut             INTEGER,
+                winner_ticket_id      INTEGER,
+                winner_tg_id          INTEGER,
+                prize_amount          INTEGER,
+                winner_balance_before INTEGER,
+                winner_balance_after  INTEGER,
+                settled_at            TEXT,
+                tax_processed_at      TEXT
+            );
+            CREATE TABLE lottery_tickets (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                round_id      INTEGER NOT NULL,
+                ticket_number INTEGER NOT NULL,
+                tg_id         INTEGER NOT NULL,
+                purchased_at  TEXT NOT NULL,
+                paid_amount   INTEGER NOT NULL,
+                dirty_amount  INTEGER NOT NULL DEFAULT 0,
+                request_key   TEXT NOT NULL UNIQUE,
+                UNIQUE (round_id, ticket_number)
+            );
+            """
+        )
+        legacy.execute(
+            """INSERT INTO profiles (tg_id, username, nick, zbucks)
+               VALUES (?, ?, ?, ?)""",
+            (101, "legacy_user", "LegacyNick", 175),
+        )
+        legacy.execute(
+            """INSERT INTO lottery_rounds
+               (id, starts_at, closes_at, status, active_slot, ticket_price, fee_bps)
+               VALUES (?, ?, ?, 'open', 1, 50, 1000)""",
+            (1, STARTS_AT.isoformat(), CLOSES_AT.isoformat()),
+        )
+        legacy.execute(
+            """INSERT INTO lottery_tickets
+               (round_id, ticket_number, tg_id, purchased_at,
+                paid_amount, dirty_amount, request_key)
+               VALUES (1, 1, 101, ?, 50, 0, 'legacy-ticket-request')""",
+            (STARTS_AT.isoformat(),),
+        )
+        legacy.commit()
+        legacy.close()
+
+        await storage.init()
+        replay = await storage.buy_lottery_ticket(
+            1,
+            101,
+            "legacy-ticket-request",
+            (STARTS_AT + timedelta(seconds=1)).isoformat(),
+        )
+
+        self.assertEqual("duplicate", replay.status)
+        self.assertEqual(1, replay.ticket_number)
+        self.assertEqual((1,), replay.ticket_numbers)
+        self.assertEqual(175, replay.balance)
+        self.assertEqual(
+            (1,), await self._fetchone("SELECT COUNT(*) FROM lottery_tickets")
         )
 
 
@@ -178,6 +267,156 @@ class LotteryStorageTests(_TemporaryStorageCase):
         )
         self.assertEqual(30, (await storage.get_profile(1))[3])
 
+    async def test_buy_ten_is_all_or_nothing_and_replay_is_idempotent(self) -> None:
+        await self._create_profile(1, balance=500, dirty=260)
+
+        bought = await storage.buy_lottery_tickets(
+            self.round_id, 1, 10, "ten-pack", STARTS_AT.isoformat()
+        )
+        self.assertEqual("ok", bought.status)
+        self.assertEqual(1, bought.ticket_number)
+        self.assertEqual(tuple(range(1, 11)), bought.ticket_numbers)
+        self.assertEqual(10, bought.total_tickets)
+        self.assertEqual(10, bought.own_tickets)
+        self.assertEqual(500, bought.gross_pool)
+        self.assertEqual(450, bought.prize_amount)
+        self.assertEqual(0, bought.balance)
+        self.assertEqual(
+            (10, 500, 260),
+            await self._fetchone(
+                """SELECT COUNT(*), COALESCE(SUM(paid_amount), 0),
+                          COALESCE(SUM(dirty_amount), 0)
+                   FROM lottery_tickets WHERE round_id = ?""",
+                (self.round_id,),
+            ),
+        )
+        self.assertEqual(
+            list(range(1, 11)),
+            [
+                row[0]
+                for row in await self._fetchall(
+                    """SELECT ticket_number FROM lottery_tickets
+                       WHERE round_id = ? ORDER BY ticket_number""",
+                    (self.round_id,),
+                )
+            ],
+        )
+
+        # Receipt переживает перезапуск storage, поэтому Telegram retry не
+        # может повторно списать пачку после рестарта процесса.
+        await storage.init()
+        duplicate = await storage.buy_lottery_tickets(
+            self.round_id,
+            1,
+            10,
+            "ten-pack",
+            (STARTS_AT + timedelta(seconds=1)).isoformat(),
+        )
+        self.assertEqual("duplicate", duplicate.status)
+        self.assertEqual(bought.ticket_id, duplicate.ticket_id)
+        self.assertEqual(tuple(range(1, 11)), duplicate.ticket_numbers)
+        self.assertEqual(0, duplicate.balance)
+
+    async def test_buy_ten_never_partially_spends_and_can_retry_after_credit(self) -> None:
+        await self._create_profile(1, balance=499)
+
+        insufficient = await storage.buy_lottery_tickets(
+            self.round_id, 1, 10, "ten-after-credit", STARTS_AT.isoformat()
+        )
+        self.assertEqual("insufficient", insufficient.status)
+        self.assertEqual((), insufficient.ticket_numbers)
+        self.assertEqual(0, insufficient.total_tickets)
+        self.assertEqual(499, (await storage.get_profile(1))[3])
+
+        await storage.add_zbucks(1, 1)
+        bought = await storage.buy_lottery_tickets(
+            self.round_id,
+            1,
+            10,
+            "ten-after-credit",
+            (STARTS_AT + timedelta(seconds=1)).isoformat(),
+        )
+        self.assertEqual("ok", bought.status)
+        self.assertEqual(tuple(range(1, 11)), bought.ticket_numbers)
+        self.assertEqual(0, bought.balance)
+
+    async def test_concurrent_ten_ticket_buys_get_unique_numbers(self) -> None:
+        await self._create_profile(1, balance=500)
+        await self._create_profile(2, balance=500)
+
+        first, second = await asyncio.gather(
+            storage.buy_lottery_tickets(
+                self.round_id, 1, 10, "concurrent-ten-a", STARTS_AT.isoformat()
+            ),
+            storage.buy_lottery_tickets(
+                self.round_id, 2, 10, "concurrent-ten-b", STARTS_AT.isoformat()
+            ),
+        )
+
+        self.assertEqual(["ok", "ok"], [first.status, second.status])
+        tickets = await self._fetchall(
+            """SELECT ticket_number, tg_id FROM lottery_tickets
+               WHERE round_id = ? ORDER BY ticket_number""",
+            (self.round_id,),
+        )
+        self.assertEqual(list(range(1, 21)), [ticket[0] for ticket in tickets])
+        self.assertEqual(10, sum(ticket[1] == 1 for ticket in tickets))
+        self.assertEqual(10, sum(ticket[1] == 2 for ticket in tickets))
+        self.assertEqual(0, (await storage.get_profile(1))[3])
+        self.assertEqual(0, (await storage.get_profile(2))[3])
+
+    async def test_concurrent_replay_of_ten_ticket_callback_charges_once(self) -> None:
+        await self._create_profile(1, balance=500)
+
+        results = await asyncio.gather(
+            storage.buy_lottery_tickets(
+                self.round_id, 1, 10, "same-ten-callback", STARTS_AT.isoformat()
+            ),
+            storage.buy_lottery_tickets(
+                self.round_id, 1, 10, "same-ten-callback", STARTS_AT.isoformat()
+            ),
+        )
+
+        self.assertCountEqual(["ok", "duplicate"], [result.status for result in results])
+        self.assertTrue(
+            all(result.ticket_numbers == tuple(range(1, 11)) for result in results)
+        )
+        self.assertEqual(0, (await storage.get_profile(1))[3])
+        self.assertEqual(
+            (10, 500),
+            await self._fetchone(
+                """SELECT COUNT(*), COALESCE(SUM(paid_amount), 0)
+                   FROM lottery_tickets WHERE round_id = ?""",
+                (self.round_id,),
+            ),
+        )
+
+    async def test_batch_child_keys_do_not_collide_with_legacy_key_shapes(self) -> None:
+        await self._create_profile(1, balance=550)
+        legacy = await storage.buy_lottery_ticket(
+            self.round_id, 1, "batch-key:2", STARTS_AT.isoformat()
+        )
+        self.assertEqual("ok", legacy.status)
+
+        batch = await storage.buy_lottery_tickets(
+            self.round_id,
+            1,
+            10,
+            "batch-key",
+            (STARTS_AT + timedelta(seconds=1)).isoformat(),
+        )
+
+        self.assertEqual("ok", batch.status)
+        self.assertEqual(tuple(range(2, 12)), batch.ticket_numbers)
+        self.assertEqual(
+            (11, 550),
+            await self._fetchone(
+                """SELECT COUNT(*), COALESCE(SUM(paid_amount), 0)
+                   FROM lottery_tickets WHERE round_id = ?""",
+                (self.round_id,),
+            ),
+        )
+
     async def test_hidden_money_is_unavailable_and_dirty_money_is_spent_first(
         self,
     ) -> None:
@@ -208,7 +447,7 @@ class LotteryStorageTests(_TemporaryStorageCase):
             (50, 50),
             await self._fetchone(
                 """SELECT paid_amount, dirty_amount FROM lottery_tickets
-                   WHERE request_key = 'dirty-purchase'"""
+                   WHERE purchase_request_key = 'dirty-purchase'"""
             ),
         )
 
@@ -731,15 +970,38 @@ class LotteryUiContractTests(unittest.TestCase):
         owner = 9_223_372_036_854_775_807
         round_id = 9_223_372_036_854_775_807
         token = "AbCdEf_123-"
-        callback = f"lot:buy:{round_id}:{token}:{owner}"
+        callback = f"lot:buy:{round_id}:10:{token}:{owner}"
 
         self.assertLessEqual(len(callback.encode("utf-8")), 64)
         self.assertEqual(
-            (round_id, token, owner), lottery_handler._buy_args(callback)
+            (round_id, 10, token, owner), lottery_handler._buy_args(callback)
+        )
+        self.assertEqual(
+            (round_id, 1, token, owner),
+            lottery_handler._buy_args(f"lot:buy:{round_id}:{token}:{owner}"),
         )
         self.assertIsNone(lottery_handler._buy_args(callback + ":tail"))
         self.assertIsNone(
-            lottery_handler._buy_args(f"lot:buy:{round_id}:too-short:{owner}")
+            lottery_handler._buy_args(f"lot:buy:{round_id}:2:{token}:{owner}")
+        )
+        self.assertIsNone(
+            lottery_handler._buy_args(f"lot:buy:{round_id}:01:{token}:{owner}")
+        )
+        self.assertIsNone(
+            lottery_handler._buy_args(f"lot:buy:{round_id}:0:{token}:{owner}")
+        )
+
+    def test_buy_callback_builder_keeps_maximum_ids_within_limit(self) -> None:
+        owner = 9_223_372_036_854_775_807
+        round_id = 9_223_372_036_854_775_807
+        callback = lottery_handler._buy_callback_data(
+            round_id, 10, "AbCdEf_123-", owner
+        )
+
+        self.assertLessEqual(len(callback.encode("utf-8")), 64)
+        self.assertEqual(
+            (round_id, 10, "AbCdEf_123-", owner),
+            lottery_handler._buy_args(callback),
         )
 
     def test_round_screen_fits_photo_caption(self) -> None:
@@ -756,6 +1018,42 @@ class LotteryUiContractTests(unittest.TestCase):
         )
         caption = lottery_content.round_screen(view, STARTS_AT, sales_closed=False)
         self.assertLessEqual(len(caption), 1_024)
+
+
+class LotteryUiRenderTests(unittest.IsolatedAsyncioTestCase):
+    async def test_open_round_shows_distinct_one_and_ten_ticket_buttons(self) -> None:
+        view = SimpleNamespace(
+            round_id=1,
+            closes_at=(datetime.now() + timedelta(hours=1)).isoformat(),
+            ticket_price=50,
+            fee_bps=1_000,
+            total_tickets=0,
+            own_tickets=0,
+            gross_pool=0,
+            prize_amount=0,
+            balance=500,
+        )
+        callback = SimpleNamespace(message=object())
+
+        with (
+            patch.object(
+                lottery_handler.storage,
+                "get_lottery_view",
+                new=AsyncMock(return_value=view),
+            ),
+            patch.object(lottery_handler, "token_urlsafe", side_effect=("one-token_1", "ten-token_2")),
+            patch.object(lottery_handler, "show_screen", new=AsyncMock()) as show_screen,
+        ):
+            await lottery_handler._render_round(callback, owner=1)
+
+        markup = show_screen.await_args.args[2]
+        buttons = markup.inline_keyboard[0]
+        self.assertEqual(["🎟 1 билет — 50 Z", "🎟 ×10 — 500 Z"], [
+            button.text for button in buttons
+        ])
+        parsed = [lottery_handler._buy_args(button.callback_data) for button in buttons]
+        self.assertEqual([1, 10], [args[1] for args in parsed])
+        self.assertNotEqual(parsed[0][2], parsed[1][2])
 
 
 if __name__ == "__main__":

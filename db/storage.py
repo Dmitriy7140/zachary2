@@ -2,12 +2,30 @@
 import asyncio
 import secrets
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Callable, Literal
 
 import aiosqlite
 
 from config import config
+from game.cube_catalog import (
+    EffectArgKind,
+    EffectBehavior,
+    EffectPlacement,
+    LayoutPolicy,
+    ROOM_ANOMALY,
+    ROOM_HAZARD,
+    ROOM_NEUTRAL,
+    ROOM_PRIZE,
+    ROOM_START,
+    cube_item_use,
+    effect_definition,
+    effect_has_behavior,
+    hazard_definition,
+    layout_item_keys,
+    layout_policy,
+    room_observation_category,
+)
 
 _db: aiosqlite.Connection | None = None
 _economy_db: aiosqlite.Connection | None = None
@@ -48,6 +66,35 @@ IllegalBusinessProgressStatus = Literal[
 ]
 IllegalBusinessCollectionStatus = Literal[
     "ok", "empty", "not_owned", "no_profile", "hour_due", "upkeep_due",
+]
+
+CubeEnterStatus = Literal[
+    "entered",
+    "resumed",
+    "not_recruiting",
+    "full",
+    "closed",
+    "insufficient",
+    "no_profile",
+    "invalid",
+]
+CubeMoveStatus = Literal[
+    "moved", "won", "wall", "hazard", "bounced", "stale", "closed", "no_run"
+]
+CubeActionStatus = Literal[
+    "resolved_and_moved",
+    "already_resolved",
+    "missing_item",
+    "wrong_item",
+    "retreated",
+    "stale",
+    "closed",
+    "no_run",
+    "invalid",
+]
+CubeObserveStatus = Literal["observed", "wall", "stale", "closed", "no_run"]
+CubeNotifyStatus = Literal[
+    "subscribed", "already_subscribed", "cancelled", "stale", "invalid"
 ]
 
 
@@ -114,6 +161,210 @@ class LaunderingSettlement:
 
 
 @dataclass(frozen=True)
+class CubeDirectionView:
+    direction: str
+    exists: bool
+    room_id: int | None = None
+    room_code: str | None = None
+    category: str | None = None
+    hazard_active: bool = False
+
+
+@dataclass(frozen=True)
+class CubeMapRoomView:
+    room_id: int
+    row: int
+    column: int
+    kind: str
+    effect_kind: str | None
+    exits: frozenset[str]
+
+
+@dataclass(frozen=True)
+class CubeRoommateView:
+    """Активный участник, действительно находящийся в той же комнате."""
+
+    run_id: int
+    tg_id: int
+    nick: str
+    version: int
+
+
+@dataclass(frozen=True)
+class CubeView:
+    generation_id: int
+    generation_status: str
+    created_at: str
+    idle_expires_at: str
+    lobby_closes_at: str | None
+    closes_at: str | None
+    roster_locked: bool
+    participant_count: int
+    prize_amount: int
+    entry_cost: int
+    prize_per_participant: int
+    max_participants: int
+    balance: int | None
+    run_id: int | None
+    run_status: str | None
+    run_version: int | None
+    current_room_id: int | None
+    room_code: str | None
+    room_kind: str | None
+    room_description_key: str | None
+    room_effect_kind: str | None
+    room_effect_arg: str | None
+    room_hazard_kind: str | None
+    room_hazard_resolved: bool
+    room_resolved_by_nick: str | None
+    subscription_id: int | None
+    subscription_generation_id: int | None
+    pending_hazard_room_id: int | None
+    pending_hazard_kind: str | None
+    explored_count: int
+    directions: tuple[CubeDirectionView, ...]
+    map_size: int = 4
+    map_rooms: tuple[CubeMapRoomView, ...] = ()
+    roommates: tuple[CubeRoommateView, ...] = ()
+    layout_version: int = 1
+
+
+@dataclass(frozen=True)
+class CubeLifecycleResult:
+    generation_id: int
+    status: str
+    transitioned: bool
+    closed_generation_id: int | None = None
+
+
+@dataclass(frozen=True)
+class CubeEnterResult:
+    status: CubeEnterStatus
+    generation_id: int
+    run_id: int | None
+    version: int | None
+    participant_count: int
+    prize_amount: int
+    balance: int
+
+
+@dataclass(frozen=True)
+class CubeObserveResult:
+    status: CubeObserveStatus
+    generation_id: int
+    version: int | None
+    target_room_id: int | None = None
+    category: str | None = None
+
+
+@dataclass(frozen=True)
+class CubeMoveResult:
+    status: CubeMoveStatus
+    generation_id: int
+    version: int | None
+    entered_room_id: int | None = None
+    final_room_id: int | None = None
+    effect_kind: str | None = None
+    effect_arg: str | None = None
+    target_room_id: int | None = None
+    prize_amount: int = 0
+    next_generation_id: int | None = None
+
+
+@dataclass(frozen=True)
+class CubeActionResult:
+    status: CubeActionStatus
+    generation_id: int
+    version: int | None
+    target_room_id: int | None = None
+    final_room_id: int | None = None
+    effect_kind: str | None = None
+    required_item_key: str | None = None
+    consume_qty: int = 0
+    hazard_kind: str | None = None
+    selected_item_key: str | None = None
+
+
+@dataclass(frozen=True)
+class CubeRoomRecord:
+    """Именованный storage-снимок комнаты вместо хрупкого SQL tuple."""
+
+    room_id: int
+    code: str
+    kind: str
+    description_key: str
+    hazard_kind: str | None
+    required_item_key: str | None
+    consume_qty: int
+    effect_kind: str | None
+    effect_target_room_id: int | None
+    effect_arg: str | None
+    revealed_at: str | None
+    resolved_at: str | None
+    resolved_by: int | None
+
+
+@dataclass(frozen=True)
+class CubeRunRecord:
+    """Авторитетный actor-state под economy lock."""
+
+    generation_status: str
+    generation_active: bool
+    prize_room_id: int
+    layout_version: int
+    run_id: int | None
+    run_status: str | None
+    current_room_id: int | None
+    previous_room_id: int | None
+    pending_hazard_room_id: int | None
+    version: int | None
+
+
+@dataclass(frozen=True)
+class CubeRoomEntryOutcome:
+    status: str
+    final_room_id: int
+    effect_kind: str | None
+    effect_arg: str | None
+    version: int
+
+
+@dataclass(frozen=True)
+class CubeNotifyResult:
+    status: CubeNotifyStatus
+    generation_id: int
+    subscription_id: int | None
+
+
+@dataclass(frozen=True)
+class CubeWinnerClaim:
+    generation_id: int
+    winner_tg_id: int
+    winner_nick: str
+    participant_count: int
+    prize_amount: int
+    winner_balance_before: int
+    winner_balance_after: int
+    claim_token: str | None = None
+
+
+@dataclass(frozen=True)
+class CubeNotification:
+    notification_id: int
+    generation_id: int
+    kind: str
+    recipient_tg_id: int | None
+    subscription_id: int | None
+    attempts: int
+    next_attempt_at: str
+    winner_tg_id: int | None
+    winner_nick: str | None
+    participant_count: int | None
+    prize_amount: int | None
+    claim_token: str | None = None
+
+
+@dataclass(frozen=True)
 class LotteryRoundView:
     round_id: int
     starts_at: str
@@ -148,6 +399,7 @@ class LotteryPurchaseResult:
     gross_pool: int
     prize_amount: int
     balance: int
+    ticket_numbers: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -401,6 +653,7 @@ async def init() -> None:
     )
     await _db.commit()
     await _init_lottery_schema()
+    await _init_cube_schema()
 
     # Критичные денежные операции идут через отдельное соединение. В отличие
     # от набора helper-вызовов на общем connection, BEGIN IMMEDIATE здесь
@@ -469,8 +722,20 @@ async def _init_lottery_schema() -> None:
             paid_amount   INTEGER NOT NULL CHECK (paid_amount > 0),
             dirty_amount  INTEGER NOT NULL DEFAULT 0
                               CHECK (dirty_amount >= 0 AND dirty_amount <= paid_amount),
-            request_key   TEXT NOT NULL UNIQUE,
+            request_key          TEXT NOT NULL UNIQUE,
+            purchase_request_key TEXT,
             UNIQUE (round_id, ticket_number)
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS lottery_purchase_requests (
+            request_key         TEXT PRIMARY KEY,
+            round_id            INTEGER NOT NULL,
+            tg_id               INTEGER NOT NULL,
+            ticket_count        INTEGER NOT NULL CHECK (ticket_count IN (1, 10)),
+            first_ticket_id     INTEGER NOT NULL,
+            first_ticket_number INTEGER NOT NULL,
+            purchased_at        TEXT NOT NULL
         )
         """,
         """
@@ -504,7 +769,8 @@ async def _init_lottery_schema() -> None:
         for statement in statements:
             await _db.execute(statement)
         # Эти колонки нужны и при повторном запуске checkout, в котором
-        # таблицы лотереи уже успели появиться до введения lease-claims.
+        # таблицы лотереи уже успели появиться до request receipt и lease-claims.
+        await _ensure_column("lottery_tickets", "purchase_request_key", "TEXT")
         await _ensure_column("lottery_rounds", "tax_claim_token", "TEXT")
         await _ensure_column("lottery_rounds", "tax_claim_until", "TEXT")
         await _ensure_column("lottery_notifications", "claim_token", "TEXT")
@@ -516,6 +782,244 @@ async def _init_lottery_schema() -> None:
         await _db.execute(
             """CREATE INDEX IF NOT EXISTS lottery_notifications_claim_idx
                ON lottery_notifications (sent_at, next_attempt_at, claim_until, id)"""
+        )
+        await _db.commit()
+    except BaseException:
+        await _db.rollback()
+        raise
+
+
+async def _init_cube_schema() -> None:
+    """Идемпотентно добавить durable-состояние общей игры «Куб»."""
+    statements = (
+        """
+        CREATE TABLE IF NOT EXISTS cube_generations (
+            id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at            TEXT NOT NULL,
+            idle_expires_at       TEXT NOT NULL,
+            recruitment_started_at TEXT,
+            lobby_closes_at       TEXT,
+            roster_locked_at      TEXT,
+            closes_at             TEXT,
+            status                TEXT NOT NULL
+                                      CHECK (status IN
+                                        ('waiting','lobby','active','won','expired')),
+            active_slot           INTEGER UNIQUE
+                                      CHECK (active_slot IS NULL OR active_slot = 1),
+            seed                  INTEGER NOT NULL,
+            layout_version        INTEGER NOT NULL,
+            size                  INTEGER NOT NULL,
+            start_room_id         INTEGER NOT NULL,
+            prize_room_id         INTEGER NOT NULL,
+            mandatory_room_id     INTEGER NOT NULL,
+            reset_minutes         INTEGER NOT NULL CHECK (reset_minutes > 0),
+            lobby_seconds         INTEGER NOT NULL CHECK (lobby_seconds > 0),
+            entry_cost            INTEGER NOT NULL CHECK (entry_cost > 0),
+            prize_per_participant INTEGER NOT NULL
+                                      CHECK (prize_per_participant > 0),
+            max_participants      INTEGER NOT NULL CHECK (max_participants > 0),
+            participant_count     INTEGER,
+            prize_amount          INTEGER,
+            winner_tg_id          INTEGER,
+            winner_balance_before INTEGER,
+            winner_balance_after  INTEGER,
+            finished_at           TEXT,
+            finish_reason         TEXT,
+            tax_processed_at      TEXT,
+            tax_claim_token       TEXT,
+            tax_claim_until       TEXT
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS cube_rooms (
+            generation_id       INTEGER NOT NULL,
+            room_id             INTEGER NOT NULL,
+            row_no              INTEGER NOT NULL,
+            column_no           INTEGER NOT NULL,
+            code                TEXT NOT NULL,
+            kind                TEXT NOT NULL,
+            description_key     TEXT NOT NULL,
+            hazard_kind         TEXT,
+            required_item_key   TEXT,
+            consume_qty         INTEGER NOT NULL DEFAULT 0 CHECK (consume_qty >= 0),
+            is_required         INTEGER NOT NULL DEFAULT 0 CHECK (is_required IN (0,1)),
+            effect_kind         TEXT,
+            effect_target_room_id INTEGER,
+            effect_arg          TEXT,
+            revealed_at         TEXT,
+            revealed_by         INTEGER,
+            resolved_at         TEXT,
+            resolved_by         INTEGER,
+            PRIMARY KEY (generation_id, room_id),
+            UNIQUE (generation_id, row_no, column_no),
+            UNIQUE (generation_id, code)
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS cube_passages (
+            generation_id INTEGER NOT NULL,
+            room_a         INTEGER NOT NULL,
+            room_b         INTEGER NOT NULL,
+            is_extra       INTEGER NOT NULL DEFAULT 0 CHECK (is_extra IN (0,1)),
+            PRIMARY KEY (generation_id, room_a, room_b),
+            CHECK (room_a < room_b)
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS cube_runs (
+            id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+            generation_id          INTEGER NOT NULL,
+            tg_id                  INTEGER NOT NULL,
+            entry_request_key      TEXT NOT NULL UNIQUE,
+            status                 TEXT NOT NULL
+                                       CHECK (status IN ('active','won','lost','expired')),
+            current_room_id        INTEGER NOT NULL,
+            previous_room_id       INTEGER,
+            pending_hazard_room_id INTEGER,
+            version                INTEGER NOT NULL DEFAULT 0,
+            steps                  INTEGER NOT NULL DEFAULT 0,
+            paid_amount            INTEGER NOT NULL CHECK (paid_amount >= 0),
+            dirty_amount           INTEGER NOT NULL DEFAULT 0 CHECK (dirty_amount >= 0),
+            entered_at             TEXT NOT NULL,
+            updated_at             TEXT NOT NULL,
+            won_at                 TEXT,
+            UNIQUE (generation_id, tg_id)
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS cube_run_visits (
+            run_id     INTEGER NOT NULL,
+            room_id    INTEGER NOT NULL,
+            visited_at TEXT NOT NULL,
+            PRIMARY KEY (run_id, room_id)
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS cube_entry_requests (
+            request_key   TEXT PRIMARY KEY,
+            generation_id INTEGER NOT NULL,
+            tg_id          INTEGER NOT NULL,
+            status         TEXT NOT NULL,
+            run_id         INTEGER,
+            created_at     TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS cube_observations (
+            generation_id INTEGER NOT NULL,
+            tg_id          INTEGER NOT NULL,
+            source_room_id INTEGER NOT NULL,
+            direction      TEXT NOT NULL CHECK (direction IN ('n','e','s','w')),
+            target_room_id INTEGER NOT NULL,
+            category       TEXT NOT NULL,
+            observed_at    TEXT NOT NULL,
+            PRIMARY KEY (generation_id, tg_id, source_room_id, direction)
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS cube_waitlist (
+            id                            INTEGER PRIMARY KEY AUTOINCREMENT,
+            tg_id                         INTEGER NOT NULL UNIQUE,
+            requested_after_generation_id INTEGER NOT NULL,
+            request_key                   TEXT NOT NULL UNIQUE,
+            requested_at                  TEXT NOT NULL,
+            claim_token                   TEXT,
+            claim_until                   TEXT
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS cube_subscription_requests (
+            request_key     TEXT PRIMARY KEY,
+            generation_id   INTEGER NOT NULL,
+            tg_id            INTEGER NOT NULL,
+            subscription_id INTEGER,
+            status           TEXT NOT NULL
+                                 CHECK (status IN ('active','cancelled','delivered')),
+            created_at       TEXT NOT NULL,
+            updated_at       TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS cube_notifications (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            generation_id   INTEGER NOT NULL,
+            kind            TEXT NOT NULL CHECK (kind IN ('winner_public','lobby_private')),
+            recipient_tg_id INTEGER,
+            subscription_id INTEGER,
+            status          TEXT NOT NULL DEFAULT 'pending'
+                                CHECK (status IN ('pending','sent','cancelled','stale')),
+            attempts        INTEGER NOT NULL DEFAULT 0,
+            next_attempt_at TEXT NOT NULL,
+            sent_at         TEXT,
+            last_error      TEXT,
+            created_at      TEXT NOT NULL,
+            claim_token     TEXT,
+            claim_until     TEXT
+        )
+        """,
+        """CREATE UNIQUE INDEX IF NOT EXISTS cube_current_generation_idx
+           ON cube_generations (active_slot) WHERE active_slot IS NOT NULL""",
+        """CREATE INDEX IF NOT EXISTS cube_generations_due_idx
+           ON cube_generations (active_slot, status, idle_expires_at, closes_at)""",
+        """CREATE INDEX IF NOT EXISTS cube_runs_generation_idx
+           ON cube_runs (generation_id, status, id)""",
+        """CREATE INDEX IF NOT EXISTS cube_runs_room_occupants_idx
+           ON cube_runs (generation_id, current_room_id, status, id)""",
+        """CREATE UNIQUE INDEX IF NOT EXISTS cube_winner_notification_idx
+           ON cube_notifications (generation_id, kind)
+           WHERE kind = 'winner_public'""",
+        """CREATE UNIQUE INDEX IF NOT EXISTS cube_lobby_notification_idx
+           ON cube_notifications (generation_id, kind, recipient_tg_id)
+           WHERE kind = 'lobby_private' AND recipient_tg_id IS NOT NULL""",
+    )
+    await _db.execute("BEGIN IMMEDIATE")
+    try:
+        for statement in statements:
+            await _db.execute(statement)
+        # Additive safety for databases created by an earlier Cube checkout.
+        await _ensure_column("cube_runs", "pending_hazard_room_id", "INTEGER")
+        await _ensure_column("cube_generations", "tax_claim_token", "TEXT")
+        await _ensure_column("cube_generations", "tax_claim_until", "TEXT")
+        await _ensure_column("cube_waitlist", "claim_token", "TEXT")
+        await _ensure_column("cube_waitlist", "claim_until", "TEXT")
+        await _ensure_column("cube_notifications", "claim_token", "TEXT")
+        await _ensure_column("cube_notifications", "claim_until", "TEXT")
+        # Старые запуски не содержат полного маршрута. Сохраняем всё, что можно
+        # восстановить без догадок: старт, предыдущую/текущую комнату и
+        # столкновение с ожидающей обезвреживания ловушкой.
+        await _db.execute(
+            """INSERT OR IGNORE INTO cube_run_visits
+               (run_id, room_id, visited_at)
+               SELECT r.id, g.start_room_id, r.entered_at
+               FROM cube_runs r
+               JOIN cube_generations g ON g.id = r.generation_id"""
+        )
+        await _db.execute(
+            """INSERT OR IGNORE INTO cube_run_visits
+               (run_id, room_id, visited_at)
+               SELECT id, previous_room_id, updated_at
+               FROM cube_runs WHERE previous_room_id IS NOT NULL"""
+        )
+        await _db.execute(
+            """INSERT OR IGNORE INTO cube_run_visits
+               (run_id, room_id, visited_at)
+               SELECT id, current_room_id, updated_at FROM cube_runs"""
+        )
+        await _db.execute(
+            """INSERT OR IGNORE INTO cube_run_visits
+               (run_id, room_id, visited_at)
+               SELECT id, pending_hazard_room_id, updated_at
+               FROM cube_runs WHERE pending_hazard_room_id IS NOT NULL"""
+        )
+        await _db.execute(
+            """CREATE INDEX IF NOT EXISTS cube_generations_tax_claim_idx
+               ON cube_generations
+                  (tax_processed_at, tax_claim_until, id)"""
+        )
+        await _db.execute(
+            """CREATE INDEX IF NOT EXISTS cube_notifications_due_idx
+               ON cube_notifications
+                  (status, next_attempt_at, claim_until, id)"""
         )
         await _db.commit()
     except BaseException:
@@ -855,22 +1359,15 @@ async def add_item(tg_id: int, item: str, qty: int = 1, max_qty: int | None = No
     слизней: иначе старое read-check-write могло бы перезаписать уже
     зафиксированную выдачу готового изделия.
     """
+    if qty < 0:
+        raise ValueError("qty must be non-negative")
+    if max_qty is not None and max_qty < 0:
+        raise ValueError("max_qty must be non-negative")
     async with _economy_lock:
         connection = _economy_connection()
         await connection.execute("BEGIN IMMEDIATE")
         try:
-            cur = await connection.execute(
-                "SELECT qty FROM inventory WHERE tg_id = ? AND item = ?", (tg_id, item)
-            )
-            row = await cur.fetchone()
-            new = (row[0] if row else 0) + qty
-            if max_qty is not None:
-                new = min(new, max_qty)
-            await connection.execute(
-                """INSERT INTO inventory (tg_id, item, qty) VALUES (?, ?, ?)
-                   ON CONFLICT (tg_id, item) DO UPDATE SET qty = excluded.qty""",
-                (tg_id, item, new),
-            )
+            new = await _add_item_on(connection, tg_id, item, qty, max_qty)
             await connection.commit()
             return new
         except BaseException:
@@ -895,18 +1392,10 @@ async def consume_item(tg_id: int, item: str, qty: int = 1) -> bool:
         connection = _economy_connection()
         await connection.execute("BEGIN IMMEDIATE")
         try:
-            cur = await connection.execute(
-                """UPDATE inventory SET qty = qty - ?
-                   WHERE tg_id = ? AND item = ? AND qty >= ?""",
-                (qty, tg_id, item, qty),
-            )
-            if cur.rowcount != 1:
+            removed = await _take_item_on(connection, tg_id, item, qty)
+            if not removed:
                 await connection.rollback()
                 return False
-            await connection.execute(
-                "DELETE FROM inventory WHERE tg_id = ? AND item = ? AND qty <= 0",
-                (tg_id, item),
-            )
             await connection.commit()
             return True
         except BaseException:
@@ -955,6 +1444,66 @@ async def consume_item_for_zbucks(
         except BaseException:
             await connection.rollback()
             raise
+
+
+async def _add_item_on(
+    connection: aiosqlite.Connection,
+    tg_id: int,
+    item: str,
+    qty: int,
+    max_qty: int | None = None,
+) -> int:
+    """Connection-aware inventory upsert; caller owns the writer transaction."""
+    if max_qty is None:
+        await connection.execute(
+            """INSERT INTO inventory (tg_id, item, qty) VALUES (?, ?, ?)
+               ON CONFLICT (tg_id, item)
+               DO UPDATE SET qty = inventory.qty + excluded.qty""",
+            (tg_id, item, qty),
+        )
+    else:
+        await connection.execute(
+            """INSERT INTO inventory (tg_id, item, qty) VALUES (?, ?, MIN(?, ?))
+               ON CONFLICT (tg_id, item)
+               DO UPDATE SET qty = MIN(?, inventory.qty + excluded.qty)""",
+            (tg_id, item, qty, max_qty, max_qty),
+        )
+    cur = await connection.execute(
+        "SELECT qty FROM inventory WHERE tg_id = ? AND item = ?", (tg_id, item)
+    )
+    row = await cur.fetchone()
+    return row[0] if row else 0
+
+
+async def _has_item_on(
+    connection: aiosqlite.Connection, tg_id: int, item: str, qty: int = 1
+) -> bool:
+    cur = await connection.execute(
+        """SELECT 1 FROM inventory
+           WHERE tg_id = ? AND item = ? AND qty >= ?""",
+        (tg_id, item, qty),
+    )
+    return await cur.fetchone() is not None
+
+
+async def _take_item_on(
+    connection: aiosqlite.Connection, tg_id: int, item: str, qty: int = 1
+) -> bool:
+    """Условно снять предметы внутри уже открытой writer-транзакции."""
+    if qty == 0:
+        return await _has_item_on(connection, tg_id, item, 1)
+    cur = await connection.execute(
+        """UPDATE inventory SET qty = qty - ?
+           WHERE tg_id = ? AND item = ? AND qty >= ?""",
+        (qty, tg_id, item, qty),
+    )
+    if cur.rowcount != 1:
+        return False
+    await connection.execute(
+        "DELETE FROM inventory WHERE tg_id = ? AND item = ? AND qty <= 0",
+        (tg_id, item),
+    )
+    return True
 
 
 # --- глобальная 24-часовая лотерея ---
@@ -1064,6 +1613,7 @@ async def _lottery_purchase_snapshot(
     tg_id: int,
     ticket_id: int | None = None,
     ticket_number: int | None = None,
+    ticket_numbers: tuple[int, ...] = (),
 ) -> LotteryPurchaseResult:
     total_tickets = own_tickets = gross_pool = prize_amount = 0
     if round_id is not None:
@@ -1091,6 +1641,7 @@ async def _lottery_purchase_snapshot(
         status=status,
         ticket_id=ticket_id,
         ticket_number=ticket_number,
+        ticket_numbers=ticket_numbers,
         round_id=round_id,
         total_tickets=total_tickets,
         own_tickets=own_tickets,
@@ -1100,15 +1651,49 @@ async def _lottery_purchase_snapshot(
     )
 
 
-async def buy_lottery_ticket(
+LOTTERY_PURCHASE_TICKET_COUNTS = frozenset((1, 10))
+
+
+async def _new_lottery_ticket_request_key(
+    connection: aiosqlite.Connection,
+) -> str:
+    """Выдать внутренний ключ физического билета, не пересекающийся с API.
+
+    Внешний ``request_key`` теперь живёт в receipt и
+    ``purchase_request_key``. Сам старый столбец ticket.request_key принимал
+    любую непустую строку, поэтому использовать его для входного ключа новых
+    покупок рискованно: он может совпасть с legacy-билетом. Внутри
+    ``BEGIN IMMEDIATE`` другой writer не вклинится между проверкой и INSERT;
+    UNIQUE остаётся защитой и от повреждённых данных.
+    """
+    while True:
+        candidate = f"lottery-ticket:{secrets.token_urlsafe(24)}"
+        cur = await connection.execute(
+            "SELECT 1 FROM lottery_tickets WHERE request_key = ?", (candidate,)
+        )
+        if await cur.fetchone() is None:
+            return candidate
+
+
+async def buy_lottery_tickets(
     round_id: int,
     tg_id: int,
+    ticket_count: int,
     request_key: str,
     now_iso: str | None = None,
 ) -> LotteryPurchaseResult:
-    """Атомарно списать цену и выпустить ровно один билет."""
+    """Атомарно купить пачку из разрешённого числа лотерейных билетов.
+
+    Одно ``BEGIN IMMEDIATE`` охватывает проверку кассы, списание и выдачу
+    непрерывного диапазона номеров. Поэтому параллельные покупки не могут
+    ни частично пройти, ни получить совпадающие номера. ``request_key``
+    хранится в отдельном durable receipt: повтор callback возвращает уже
+    выданную пачку, но повторно деньги не списывает.
+    """
     if not request_key:
         raise ValueError("request_key must not be empty")
+    if ticket_count not in LOTTERY_PURCHASE_TICKET_COUNTS:
+        raise ValueError("ticket_count must be one of 1 or 10")
     current_iso = now_iso or datetime.now().isoformat()
     current = datetime.fromisoformat(current_iso)
 
@@ -1117,19 +1702,50 @@ async def buy_lottery_ticket(
         await connection.execute("BEGIN IMMEDIATE")
         try:
             cur = await connection.execute(
-                """SELECT id, ticket_number, round_id, tg_id
-                   FROM lottery_tickets WHERE request_key = ?""",
+                """SELECT round_id, tg_id, ticket_count,
+                          first_ticket_id, first_ticket_number
+                   FROM lottery_purchase_requests WHERE request_key = ?""",
                 (request_key,),
             )
             replay = await cur.fetchone()
             if replay:
+                belongs_to_requester = replay[1] == tg_id
                 result = await _lottery_purchase_snapshot(
                     connection,
                     status="duplicate",
-                    round_id=replay[2],
+                    round_id=replay[0],
                     tg_id=tg_id,
-                    ticket_id=replay[0] if replay[3] == tg_id else None,
-                    ticket_number=replay[1] if replay[3] == tg_id else None,
+                    ticket_id=replay[3] if belongs_to_requester else None,
+                    ticket_number=replay[4] if belongs_to_requester else None,
+                    ticket_numbers=(
+                        tuple(range(replay[4], replay[4] + replay[2]))
+                        if belongs_to_requester
+                        else ()
+                    ),
+                )
+                await connection.commit()
+                return result
+
+            # До появления receipt-таблицы request_key жил прямо в одном
+            # билете. Такие уже выданные одиночные покупки остаются
+            # идемпотентными после additive-миграции.
+            cur = await connection.execute(
+                """SELECT id, ticket_number, round_id, tg_id
+                   FROM lottery_tickets
+                   WHERE request_key = ? AND purchase_request_key IS NULL""",
+                (request_key,),
+            )
+            legacy_replay = await cur.fetchone()
+            if legacy_replay:
+                belongs_to_requester = legacy_replay[3] == tg_id
+                result = await _lottery_purchase_snapshot(
+                    connection,
+                    status="duplicate",
+                    round_id=legacy_replay[2],
+                    tg_id=tg_id,
+                    ticket_id=legacy_replay[0] if belongs_to_requester else None,
+                    ticket_number=legacy_replay[1] if belongs_to_requester else None,
+                    ticket_numbers=(legacy_replay[1],) if belongs_to_requester else (),
                 )
                 await connection.commit()
                 return result
@@ -1166,56 +1782,103 @@ async def buy_lottery_ticket(
 
             balance, dirty = profile[0], profile[1] or 0
             price = lottery_round[4]
+            total_price = price * ticket_count
             hidden = await _hidden_amount_on(connection, tg_id, current)
-            if balance - hidden < price:
+            if balance - hidden < total_price:
                 result = await _lottery_purchase_snapshot(
                     connection, status="insufficient", round_id=round_id, tg_id=tg_id
                 )
                 await connection.rollback()
                 return result
 
-            dirty_spend = min(price, max(0, dirty - hidden))
+            dirty_spend = min(total_price, max(0, dirty - hidden))
             cur = await connection.execute(
                 """SELECT COALESCE(MAX(ticket_number), 0) + 1
                    FROM lottery_tickets WHERE round_id = ?""",
                 (round_id,),
             )
-            ticket_number = (await cur.fetchone())[0]
+            first_ticket_number = (await cur.fetchone())[0]
+            ticket_numbers = tuple(
+                range(first_ticket_number, first_ticket_number + ticket_count)
+            )
             await connection.execute(
                 """UPDATE profiles
                    SET zbucks = zbucks - ?, dirty = dirty - ?
                    WHERE tg_id = ?""",
-                (price, dirty_spend, tg_id),
+                (total_price, dirty_spend, tg_id),
             )
-            cur = await connection.execute(
-                """INSERT INTO lottery_tickets
-                   (round_id, ticket_number, tg_id, purchased_at,
-                    paid_amount, dirty_amount, request_key)
+            remaining_dirty_spend = dirty_spend
+            ticket_id = None
+            for offset, ticket_number in enumerate(ticket_numbers):
+                ticket_dirty_amount = min(price, remaining_dirty_spend)
+                remaining_dirty_spend -= ticket_dirty_amount
+                ticket_request_key = await _new_lottery_ticket_request_key(connection)
+                cur = await connection.execute(
+                    """INSERT INTO lottery_tickets
+                       (round_id, ticket_number, tg_id, purchased_at,
+                        paid_amount, dirty_amount, request_key, purchase_request_key)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        round_id,
+                        ticket_number,
+                        tg_id,
+                        current_iso,
+                        price,
+                        ticket_dirty_amount,
+                        ticket_request_key,
+                        request_key,
+                    ),
+                )
+                if offset == 0:
+                    ticket_id = cur.lastrowid
+
+            if ticket_id is None:
+                raise RuntimeError("lottery ticket insert returned no id")
+            await connection.execute(
+                """INSERT INTO lottery_purchase_requests
+                   (request_key, round_id, tg_id, ticket_count,
+                    first_ticket_id, first_ticket_number, purchased_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
                 (
-                    round_id,
-                    ticket_number,
-                    tg_id,
-                    current_iso,
-                    price,
-                    dirty_spend,
                     request_key,
+                    round_id,
+                    tg_id,
+                    ticket_count,
+                    ticket_id,
+                    first_ticket_number,
+                    current_iso,
                 ),
             )
-            ticket_id = cur.lastrowid
             result = await _lottery_purchase_snapshot(
                 connection,
                 status="ok",
                 round_id=round_id,
                 tg_id=tg_id,
                 ticket_id=ticket_id,
-                ticket_number=ticket_number,
+                ticket_number=first_ticket_number,
+                ticket_numbers=ticket_numbers,
             )
             await connection.commit()
             return result
         except BaseException:
             await connection.rollback()
             raise
+
+
+async def buy_lottery_ticket(
+    round_id: int,
+    tg_id: int,
+    request_key: str,
+    now_iso: str | None = None,
+) -> LotteryPurchaseResult:
+    """Совместимый одно-билетный wrapper над атомарной batch-покупкой."""
+    return await buy_lottery_tickets(
+        round_id=round_id,
+        tg_id=tg_id,
+        ticket_count=1,
+        request_key=request_key,
+        now_iso=now_iso,
+    )
 
 
 async def due_lottery_round_ids(now_iso: str | None = None) -> list[int]:
@@ -2197,9 +2860,18 @@ async def reset_all_cooldowns() -> int:
 
 async def clear_inventory(tg_id: int) -> int:
     """Удалить все предметы игрока. Вернуть число удалённых записей."""
-    cur = await _db.execute("DELETE FROM inventory WHERE tg_id = ?", (tg_id,))
-    await _db.commit()
-    return cur.rowcount
+    async with _economy_lock:
+        connection = _economy_connection()
+        await connection.execute("BEGIN IMMEDIATE")
+        try:
+            cur = await connection.execute(
+                "DELETE FROM inventory WHERE tg_id = ?", (tg_id,)
+            )
+            await connection.commit()
+            return cur.rowcount
+        except BaseException:
+            await connection.rollback()
+            raise
 
 
 # --- самозанятость и бизнесы ---
@@ -3225,3 +3897,2406 @@ async def theft_cooldown_left(tg_id: int) -> int:
         return 0
     left = (datetime.fromisoformat(row[0]) - datetime.now()).total_seconds()
     return max(0, int(left))
+
+
+# --- глобальный текстовый лабиринт «Куб» ---
+
+_CUBE_DIRECTIONS = ("n", "e", "s", "w")
+_CUBE_DIRECTION_DELTAS = {
+    "n": (-1, 0),
+    "e": (0, 1),
+    "s": (1, 0),
+    "w": (0, -1),
+}
+_CUBE_DIRECTION_BY_DELTA = {
+    delta: direction for direction, delta in _CUBE_DIRECTION_DELTAS.items()
+}
+
+
+def _cube_effective_now(clock: Callable[[], datetime] | None) -> datetime:
+    """Снять clock внутри writer-lock; это часть concurrency-контракта Куба."""
+    value = clock() if clock is not None else datetime.utcnow()
+    if not isinstance(value, datetime):
+        raise TypeError("cube clock must return datetime")
+    return value
+
+
+async def _record_cube_visit_on(
+    connection: aiosqlite.Connection,
+    run_id: int,
+    room_id: int,
+    visited_at: str,
+) -> None:
+    """Идемпотентно расширить личную карту внутри транзакции движения."""
+    await connection.execute(
+        """INSERT OR IGNORE INTO cube_run_visits
+           (run_id, room_id, visited_at) VALUES (?, ?, ?)""",
+        (run_id, room_id, visited_at),
+    )
+
+
+def _cube_settings() -> tuple[int, int, int, int, int]:
+    return (
+        config.cube_reset_minutes,
+        config.cube_lobby_seconds,
+        config.cube_entry_cost,
+        config.cube_prize_per_participant,
+        config.cube_max_participants,
+    )
+
+
+def _cube_room_attr(room: object, name: str, default=None):
+    if isinstance(room, dict):
+        return room.get(name, default)
+    return getattr(room, name, default)
+
+
+def _cube_normalized_passages(
+    passages: tuple[object, ...], room_positions: dict[int, tuple[int, int]]
+) -> tuple[tuple[int, int, bool], ...]:
+    """Проверить materialized topology до первого INSERT и нормализовать edges."""
+    room_ids = set(room_positions)
+    result: list[tuple[int, int, bool]] = []
+    seen: set[tuple[int, int]] = set()
+    for passage in passages:
+        room_a = int(_cube_room_attr(passage, "room_a"))
+        room_b = int(_cube_room_attr(passage, "room_b"))
+        if room_a > room_b:
+            room_a, room_b = room_b, room_a
+        edge = (room_a, room_b)
+        if room_a == room_b or room_a not in room_ids or room_b not in room_ids:
+            raise ValueError("cube passage references invalid rooms")
+        if edge in seen:
+            raise ValueError("cube spec contains a duplicate passage")
+        row_a, column_a = room_positions[room_a]
+        row_b, column_b = room_positions[room_b]
+        if abs(row_a - row_b) + abs(column_a - column_b) != 1:
+            raise ValueError("cube passage connects non-adjacent rooms")
+        seen.add(edge)
+        result.append(
+            (room_a, room_b, bool(_cube_room_attr(passage, "is_extra", False)))
+        )
+    return tuple(result)
+
+
+def _cube_connected_without_room(
+    passage_edges: frozenset[tuple[int, int]],
+    source_room_id: int,
+    target_room_id: int,
+    blocked_room_id: int,
+) -> bool:
+    if source_room_id == blocked_room_id or target_room_id == blocked_room_id:
+        return False
+    seen = {source_room_id}
+    pending = [source_room_id]
+    while pending:
+        current = pending.pop()
+        for room_a, room_b in passage_edges:
+            if current == room_a:
+                neighbor = room_b
+            elif current == room_b:
+                neighbor = room_a
+            else:
+                continue
+            if neighbor == blocked_room_id or neighbor in seen:
+                continue
+            if neighbor == target_room_id:
+                return True
+            seen.add(neighbor)
+            pending.append(neighbor)
+    return source_room_id == target_room_id
+
+
+def _validate_cube_room_catalog(
+    rooms: tuple[object, ...],
+    *,
+    policy: LayoutPolicy,
+    passage_edges: frozenset[tuple[int, int]],
+    start_room_id: int,
+    prize_room_id: int,
+    mandatory_room_id: int,
+) -> None:
+    """Fail closed до INSERT, если spec и зарегистрированные механики разошлись."""
+    room_ids = [int(_cube_room_attr(room, "room_id")) for room in rooms]
+    if len(set(room_ids)) != len(room_ids):
+        raise ValueError("cube spec contains duplicate room ids")
+    rooms_by_id = {
+        int(_cube_room_attr(room, "room_id")): room for room in rooms
+    }
+    coordinates = {
+        room_id: (
+            int(_cube_room_attr(room, "row")),
+            int(_cube_room_attr(room, "column")),
+        )
+        for room_id, room in rooms_by_id.items()
+    }
+    if len(set(coordinates.values())) != len(coordinates):
+        raise ValueError("cube spec contains duplicate room coordinates")
+    required = [
+        int(_cube_room_attr(room, "room_id"))
+        for room in rooms
+        if bool(_cube_room_attr(room, "is_required", False))
+    ]
+    if required != [mandatory_room_id]:
+        raise ValueError("cube spec must contain exactly one mandatory room")
+
+    for room in rooms:
+        room_id = int(_cube_room_attr(room, "room_id"))
+        kind = str(_cube_room_attr(room, "kind"))
+        description_key = str(_cube_room_attr(room, "description_key"))
+        hazard_kind = _cube_room_attr(room, "hazard_kind")
+        effect_kind = _cube_room_attr(room, "effect_kind")
+        effect_target_room_id = _cube_room_attr(room, "effect_target_room_id")
+        effect_arg = _cube_room_attr(room, "effect_arg")
+        if hazard_kind is not None and effect_kind is not None:
+            raise ValueError("cube room cannot be both hazard and effect")
+
+        if room_id == start_room_id:
+            if kind != ROOM_START or description_key != "start":
+                raise ValueError("cube start room has invalid definition")
+        elif kind == ROOM_START:
+            raise ValueError("cube spec contains an extra start room")
+        if room_id == prize_room_id:
+            if kind != ROOM_PRIZE or description_key != "prize":
+                raise ValueError("cube prize room has invalid definition")
+        elif kind == ROOM_PRIZE:
+            raise ValueError("cube spec contains an extra prize room")
+
+        if hazard_kind is not None:
+            definition = hazard_definition(str(hazard_kind))
+            if definition is None or definition.key not in policy.hazard_keys:
+                raise ValueError(f"unknown Cube hazard for layout: {hazard_kind}")
+            if kind != ROOM_HAZARD or description_key != definition.description_key:
+                raise ValueError("cube hazard room does not match its catalog entry")
+            if _cube_room_attr(room, "required_item_key") != definition.item_key:
+                raise ValueError("cube hazard solution does not match its catalog entry")
+            consume_qty = int(_cube_room_attr(room, "consume_qty", 0) or 0)
+            if consume_qty != definition.consume_qty:
+                raise ValueError("cube hazard cost does not match its catalog entry")
+        elif kind == ROOM_HAZARD:
+            raise ValueError("cube hazard room has no registered hazard")
+
+        if effect_kind is not None:
+            definition = effect_definition(str(effect_kind))
+            if definition is None or definition.key not in policy.effect_keys:
+                raise ValueError(f"unknown Cube effect for layout: {effect_kind}")
+            if kind != ROOM_ANOMALY or description_key != definition.description_key:
+                raise ValueError("cube effect room does not match its catalog entry")
+            if (
+                definition.behavior
+                in {EffectBehavior.REVEAL_NEIGHBOR, EffectBehavior.TRANSFER}
+                and effect_target_room_id is None
+            ):
+                raise ValueError("cube targeted effect has no target room")
+            if effect_target_room_id is not None:
+                target_room_id = int(effect_target_room_id)
+                target = rooms_by_id.get(target_room_id)
+                if target is None:
+                    raise ValueError("cube effect references an unknown target room")
+                if definition.arg_kind is EffectArgKind.TARGET_ROOM_CODE:
+                    target_code = str(_cube_room_attr(target, "code"))
+                    if effect_arg != target_code:
+                        raise ValueError("cube transfer arg does not match target code")
+                if definition.behavior is EffectBehavior.REVEAL_NEIGHBOR:
+                    edge = tuple(sorted((room_id, target_room_id)))
+                    if edge not in passage_edges:
+                        raise ValueError("cube hint target is not behind a passage")
+                    source_row, source_column = coordinates[room_id]
+                    target_row, target_column = coordinates[target_room_id]
+                    if _CUBE_DIRECTION_DELTAS.get(effect_arg) != (
+                        target_row - source_row,
+                        target_column - source_column,
+                    ):
+                        raise ValueError("cube hint direction does not match its target")
+                if definition.behavior is EffectBehavior.TRANSFER:
+                    target_kind = str(_cube_room_attr(target, "kind"))
+                    if target_room_id == room_id or target_kind in {
+                        ROOM_START,
+                        ROOM_PRIZE,
+                        ROOM_HAZARD,
+                    }:
+                        raise ValueError("cube transfer has a forbidden target room")
+                    if not _cube_connected_without_room(
+                        passage_edges,
+                        room_id,
+                        target_room_id,
+                        mandatory_room_id,
+                    ):
+                        raise ValueError("cube transfer crosses the mandatory room")
+                    if definition.placement is EffectPlacement.PAIRED_SAME_COMPONENT:
+                        reverse_kind = _cube_room_attr(target, "effect_kind")
+                        reverse = effect_definition(
+                            None if reverse_kind is None else str(reverse_kind)
+                        )
+                        reverse_target = _cube_room_attr(
+                            target, "effect_target_room_id"
+                        )
+                        if (
+                            reverse is None
+                            or reverse.key != definition.key
+                            or reverse_target is None
+                            or int(reverse_target) != room_id
+                        ):
+                            raise ValueError("cube paired transfer is not reciprocal")
+            if (
+                definition.arg_kind is EffectArgKind.DIRECTION
+                and effect_arg not in _CUBE_DIRECTIONS
+            ):
+                raise ValueError("cube directional effect has invalid direction")
+            if definition.arg_kind is EffectArgKind.NONE and (
+                effect_arg is not None or effect_target_room_id is not None
+            ):
+                raise ValueError("cube effect unexpectedly has a target or argument")
+        elif kind == ROOM_ANOMALY:
+            raise ValueError("cube anomaly room has no registered effect")
+
+        if hazard_kind is None and effect_kind is None:
+            if kind == ROOM_NEUTRAL:
+                if description_key not in policy.neutral_description_keys:
+                    raise ValueError("unknown Cube neutral room for layout")
+            elif kind not in {ROOM_START, ROOM_PRIZE}:
+                raise ValueError(f"unknown Cube room kind: {kind}")
+
+    mandatory = rooms_by_id[mandatory_room_id]
+    if _cube_room_attr(mandatory, "hazard_kind") is None:
+        raise ValueError("cube mandatory room must be a registered hazard")
+
+
+async def _insert_cube_generation_on(
+    connection: aiosqlite.Connection,
+    spec: object,
+    current: datetime,
+) -> int:
+    """Сохранить полностью materialized duck-typed CubeSpec."""
+    reset_minutes, lobby_seconds, entry_cost, prize_per, max_players = (
+        _cube_settings()
+    )
+    if reset_minutes <= 0 or lobby_seconds <= 0 or entry_cost <= 0 or prize_per <= 0:
+        raise ValueError("cube settings must be positive")
+    if lobby_seconds >= reset_minutes * 60:
+        raise ValueError("cube lobby must be shorter than the generation lifetime")
+    if not 1 <= max_players <= 16:
+        raise ValueError("cube max participants must be between 1 and 16")
+
+    rooms = tuple(_cube_room_attr(spec, "rooms", ()))
+    passages = tuple(_cube_room_attr(spec, "passages", ()))
+    size = int(_cube_room_attr(spec, "size", 4))
+    if size <= 0 or len(rooms) != size * size:
+        raise ValueError("cube spec must contain size squared rooms")
+    room_ids = {int(_cube_room_attr(room, "room_id")) for room in rooms}
+    if len(room_ids) != len(rooms):
+        raise ValueError("cube spec contains duplicate room ids")
+    room_positions = {
+        int(_cube_room_attr(room, "room_id")): (
+            int(_cube_room_attr(room, "row")),
+            int(_cube_room_attr(room, "column")),
+        )
+        for room in rooms
+    }
+    expected_positions = {
+        (row, column) for row in range(size) for column in range(size)
+    }
+    if set(room_positions.values()) != expected_positions:
+        raise ValueError("cube spec must fill its coordinate grid exactly once")
+    start_room_id = int(_cube_room_attr(spec, "start_room_id"))
+    prize_room_id = int(_cube_room_attr(spec, "prize_room_id"))
+    mandatory_room_id = int(_cube_room_attr(spec, "mandatory_room_id"))
+    if not {start_room_id, prize_room_id, mandatory_room_id} <= room_ids:
+        raise ValueError("cube spec references an unknown special room")
+    layout_version = int(_cube_room_attr(spec, "layout_version", 1))
+    policy = layout_policy(layout_version)
+    normalized_passages = _cube_normalized_passages(passages, room_positions)
+    _validate_cube_room_catalog(
+        rooms,
+        policy=policy,
+        passage_edges=frozenset(
+            (room_a, room_b) for room_a, room_b, _ in normalized_passages
+        ),
+        start_room_id=start_room_id,
+        prize_room_id=prize_room_id,
+        mandatory_room_id=mandatory_room_id,
+    )
+
+    now_iso = current.isoformat()
+    idle_expires_at = (current + timedelta(minutes=reset_minutes)).isoformat()
+    cur = await connection.execute(
+        """INSERT INTO cube_generations
+           (created_at, idle_expires_at, status, active_slot, seed,
+            layout_version, size, start_room_id, prize_room_id,
+            mandatory_room_id, reset_minutes, lobby_seconds, entry_cost,
+            prize_per_participant, max_participants)
+           VALUES (?, ?, 'waiting', 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            now_iso,
+            idle_expires_at,
+            int(_cube_room_attr(spec, "seed")),
+            layout_version,
+            size,
+            start_room_id,
+            prize_room_id,
+            mandatory_room_id,
+            reset_minutes,
+            lobby_seconds,
+            entry_cost,
+            prize_per,
+            max_players,
+        ),
+    )
+    generation_id = cur.lastrowid
+    await connection.executemany(
+        """INSERT INTO cube_rooms
+           (generation_id, room_id, row_no, column_no, code, kind,
+            description_key, hazard_kind, required_item_key, consume_qty,
+            is_required, effect_kind, effect_target_room_id, effect_arg)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        tuple(
+            (
+                generation_id,
+                int(_cube_room_attr(room, "room_id")),
+                int(_cube_room_attr(room, "row")),
+                int(_cube_room_attr(room, "column")),
+                str(_cube_room_attr(room, "code")),
+                str(_cube_room_attr(room, "kind")),
+                str(_cube_room_attr(room, "description_key")),
+                _cube_room_attr(room, "hazard_kind"),
+                _cube_room_attr(room, "required_item_key"),
+                int(_cube_room_attr(room, "consume_qty", 0) or 0),
+                int(bool(_cube_room_attr(room, "is_required", False))),
+                _cube_room_attr(room, "effect_kind"),
+                _cube_room_attr(room, "effect_target_room_id"),
+                (
+                    None
+                    if _cube_room_attr(room, "effect_arg") is None
+                    else str(_cube_room_attr(room, "effect_arg"))
+                ),
+            )
+            for room in rooms
+        ),
+    )
+    passage_rows = tuple(
+        (generation_id, room_a, room_b, int(is_extra))
+        for room_a, room_b, is_extra in normalized_passages
+    )
+    await connection.executemany(
+        """INSERT INTO cube_passages
+           (generation_id, room_a, room_b, is_extra) VALUES (?, ?, ?, ?)""",
+        passage_rows,
+    )
+
+    # Новый waiting-Куб порождает durable invite, но подписка удалится только
+    # после подтверждённой отправки worker-ом.
+    await connection.execute(
+        """INSERT OR IGNORE INTO cube_notifications
+           (generation_id, kind, recipient_tg_id, subscription_id,
+            next_attempt_at, created_at)
+           SELECT ?, 'lobby_private', tg_id, id, ?, ?
+           FROM cube_waitlist WHERE requested_after_generation_id < ?""",
+        (generation_id, now_iso, now_iso, generation_id),
+    )
+    return generation_id
+
+
+async def _lock_cube_roster_on(
+    connection: aiosqlite.Connection, generation_id: int, now_iso: str
+) -> tuple[int, int]:
+    cur = await connection.execute(
+        """SELECT COUNT(*) FROM cube_runs
+           WHERE generation_id = ? AND status = 'active'""",
+        (generation_id,),
+    )
+    participant_count = (await cur.fetchone())[0]
+    cur = await connection.execute(
+        """SELECT prize_per_participant FROM cube_generations WHERE id = ?""",
+        (generation_id,),
+    )
+    row = await cur.fetchone()
+    if not row:
+        raise RuntimeError("cube generation disappeared")
+    prize_amount = participant_count * row[0]
+    await connection.execute(
+        """UPDATE cube_generations
+           SET status = CASE WHEN status = 'lobby' THEN 'active' ELSE status END,
+               roster_locked_at = COALESCE(roster_locked_at, ?),
+               participant_count = COALESCE(participant_count, ?),
+               prize_amount = COALESCE(prize_amount, ?)
+           WHERE id = ?""",
+        (now_iso, participant_count, prize_amount, generation_id),
+    )
+    return participant_count, prize_amount
+
+
+async def _advance_cube_lifecycle_on(
+    connection: aiosqlite.Connection,
+    current: datetime,
+    next_spec: object,
+) -> CubeLifecycleResult:
+    now_iso = current.isoformat()
+    cur = await connection.execute(
+        """SELECT id, status, idle_expires_at, lobby_closes_at, closes_at
+           FROM cube_generations WHERE active_slot = 1
+           ORDER BY id DESC LIMIT 1"""
+    )
+    row = await cur.fetchone()
+    if not row:
+        generation_id = await _insert_cube_generation_on(connection, next_spec, current)
+        return CubeLifecycleResult(generation_id, "waiting", True, None)
+
+    generation_id, status, idle_expires_at, lobby_closes_at, closes_at = row
+    due = (
+        status == "waiting"
+        and datetime.fromisoformat(idle_expires_at) <= current
+    ) or (
+        status in ("lobby", "active")
+        and closes_at is not None
+        and datetime.fromisoformat(closes_at) <= current
+    )
+    if due:
+        reason = "idle_expired" if status == "waiting" else "timeout"
+        if status in ("lobby", "active"):
+            # A long downtime may skip the normal lobby-lock tick entirely.
+            # Preserve the paid roster/jackpot snapshot before expiring runs.
+            await _lock_cube_roster_on(connection, generation_id, now_iso)
+        await connection.execute(
+            """UPDATE cube_generations
+               SET status = 'expired', active_slot = NULL, finished_at = ?,
+                   finish_reason = ?, tax_processed_at = ?
+               WHERE id = ? AND active_slot = 1""",
+            (now_iso, reason, now_iso, generation_id),
+        )
+        await connection.execute(
+            """UPDATE cube_runs SET status = 'expired', updated_at = ?
+               WHERE generation_id = ? AND status = 'active'""",
+            (now_iso, generation_id),
+        )
+        new_id = await _insert_cube_generation_on(connection, next_spec, current)
+        return CubeLifecycleResult(new_id, "waiting", True, generation_id)
+
+    if (
+        status == "lobby"
+        and lobby_closes_at is not None
+        and datetime.fromisoformat(lobby_closes_at) <= current
+    ):
+        await _lock_cube_roster_on(connection, generation_id, now_iso)
+        return CubeLifecycleResult(generation_id, "active", True, None)
+
+    return CubeLifecycleResult(generation_id, status, False, None)
+
+
+async def advance_cube_lifecycle(
+    next_spec: object, *, clock: Callable[[], datetime] | None = None
+) -> CubeLifecycleResult:
+    """Закрыть due-поколение/набор и гарантировать одно текущее поколение."""
+    async with _economy_lock:
+        connection = _economy_connection()
+        await connection.execute("BEGIN IMMEDIATE")
+        try:
+            current = _cube_effective_now(clock)
+            result = await _advance_cube_lifecycle_on(connection, current, next_spec)
+            await connection.commit()
+            return result
+        except BaseException:
+            await connection.rollback()
+            raise
+
+
+async def bootstrap_cube(
+    next_spec: object, *, clock: Callable[[], datetime] | None = None
+) -> CubeLifecycleResult:
+    """Startup-вариант lifecycle; сохраняет тот же атомарный контракт."""
+    return await advance_cube_lifecycle(next_spec, clock=clock)
+
+
+async def get_current_cube_generation_id() -> int | None:
+    cur = await _db.execute(
+        "SELECT id FROM cube_generations WHERE active_slot = 1 ORDER BY id DESC LIMIT 1"
+    )
+    row = await cur.fetchone()
+    return row[0] if row else None
+
+
+def _cube_category(kind: str, effect_kind: str | None = None) -> str:
+    """Категория осмотра выводится из единого каталога механик."""
+    return room_observation_category(kind, effect_kind)
+
+
+def _cube_room_record(row) -> CubeRoomRecord | None:
+    return CubeRoomRecord(*row) if row is not None else None
+
+
+async def _cube_room_by_id_on(
+    connection: aiosqlite.Connection,
+    generation_id: int,
+    room_id: int,
+) -> CubeRoomRecord | None:
+    cur = await connection.execute(
+        """SELECT room_id, code, kind, description_key,
+                  hazard_kind, required_item_key, consume_qty,
+                  effect_kind, effect_target_room_id, effect_arg,
+                  revealed_at, resolved_at, resolved_by
+           FROM cube_rooms WHERE generation_id = ? AND room_id = ?""",
+        (generation_id, room_id),
+    )
+    return _cube_room_record(await cur.fetchone())
+
+
+async def _cube_roommates_on(
+    connection: aiosqlite.Connection,
+    generation_id: int,
+    room_id: int,
+    *,
+    exclude_tg_id: int,
+) -> tuple[CubeRoommateView, ...]:
+    """Снять co-location под тем же lock, который защитит будущее действие."""
+    cur = await connection.execute(
+        """SELECT r.id, r.tg_id, p.nick, r.version
+           FROM cube_runs r
+           JOIN profiles p ON p.tg_id = r.tg_id
+           WHERE r.generation_id = ? AND r.current_room_id = ?
+             AND r.status = 'active' AND r.tg_id != ?
+           ORDER BY p.nick COLLATE NOCASE, r.id""",
+        (generation_id, room_id, exclude_tg_id),
+    )
+    return tuple(CubeRoommateView(*row) for row in await cur.fetchall())
+
+
+async def _cube_target_on(
+    connection: aiosqlite.Connection,
+    generation_id: int,
+    source_room_id: int,
+    direction: str,
+) -> CubeRoomRecord | None:
+    if direction not in _CUBE_DIRECTION_DELTAS:
+        return None
+    cur = await connection.execute(
+        """SELECT room_id, row_no, column_no FROM cube_rooms
+           WHERE generation_id = ? AND room_id = ?""",
+        (generation_id, source_room_id),
+    )
+    source = await cur.fetchone()
+    if not source:
+        return None
+    delta_row, delta_column = _CUBE_DIRECTION_DELTAS[direction]
+    target_row = source[1] + delta_row
+    target_column = source[2] + delta_column
+    cur = await connection.execute(
+        """SELECT r.room_id, r.code, r.kind, r.description_key,
+                  r.hazard_kind, r.required_item_key, r.consume_qty,
+                  r.effect_kind, r.effect_target_room_id, r.effect_arg,
+                  r.revealed_at, r.resolved_at, r.resolved_by
+           FROM cube_rooms r
+           JOIN cube_passages p
+             ON p.generation_id = r.generation_id
+            AND ((p.room_a = ? AND p.room_b = r.room_id)
+              OR (p.room_b = ? AND p.room_a = r.room_id))
+           WHERE r.generation_id = ? AND r.row_no = ? AND r.column_no = ?""",
+        (
+            source_room_id,
+            source_room_id,
+            generation_id,
+            target_row,
+            target_column,
+        ),
+    )
+    return _cube_room_record(await cur.fetchone())
+
+
+async def get_cube_view(
+    tg_id: int, generation_id: int | None = None
+) -> CubeView | None:
+    """Консистентный снимок поколения и личной позиции без lifecycle side effect."""
+    # Все мутации Куба используют тот же writer-lock. Удерживая его на время
+    # нескольких SELECT, не смешиваем старую позицию с уже новым набором
+    # посещений при двух почти одновременных callback одного игрока.
+    async with _economy_lock:
+        return await _get_cube_view_unlocked(tg_id, generation_id)
+
+
+async def _get_cube_view_unlocked(
+    tg_id: int, generation_id: int | None = None
+) -> CubeView | None:
+    params: tuple = ()
+    where = "active_slot = 1"
+    if generation_id is not None:
+        where = "id = ?"
+        params = (generation_id,)
+    cur = await _db.execute(
+        f"""SELECT id, status, created_at, idle_expires_at, lobby_closes_at,
+                   closes_at, roster_locked_at, entry_cost,
+                   prize_per_participant, max_participants,
+                   participant_count, prize_amount, size, layout_version
+            FROM cube_generations WHERE {where}
+            ORDER BY id DESC LIMIT 1""",
+        params,
+    )
+    generation = await cur.fetchone()
+    if not generation:
+        return None
+    gen_id = generation[0]
+    cur = await _db.execute(
+        "SELECT zbucks FROM profiles WHERE tg_id = ?", (tg_id,)
+    )
+    profile = await cur.fetchone()
+    cur = await _db.execute(
+        """SELECT id, status, version, current_room_id, pending_hazard_room_id
+           FROM cube_runs WHERE generation_id = ? AND tg_id = ?""",
+        (gen_id, tg_id),
+    )
+    run = await cur.fetchone()
+    cur = await _db.execute(
+        """SELECT COUNT(*) FROM cube_runs
+           WHERE generation_id = ? AND status IN ('active','won','lost')""",
+        (gen_id,),
+    )
+    live_count = (await cur.fetchone())[0]
+    participant_count = generation[10] if generation[10] is not None else live_count
+    prize_amount = (
+        generation[11]
+        if generation[11] is not None
+        else participant_count * generation[8]
+    )
+    cur = await _db.execute(
+        "SELECT id, requested_after_generation_id FROM cube_waitlist WHERE tg_id = ?",
+        (tg_id,),
+    )
+    subscription = await cur.fetchone()
+
+    room = pending = None
+    resolved_by_nick = None
+    directions: list[CubeDirectionView] = []
+    map_rooms: list[CubeMapRoomView] = []
+    roommates: list[CubeRoommateView] = []
+    explored_count = 0
+    if run:
+        room = await _cube_room_by_id_on(_db, gen_id, run[3])
+        if room and room.resolved_by is not None:
+            cur = await _db.execute(
+                "SELECT nick FROM profiles WHERE tg_id = ?", (room.resolved_by,)
+            )
+            resolver = await cur.fetchone()
+            resolved_by_nick = resolver[0] if resolver else None
+        if run[1] == "active":
+            roommates = list(
+                await _cube_roommates_on(
+                    _db,
+                    gen_id,
+                    run[3],
+                    exclude_tg_id=tg_id,
+                )
+            )
+        if run[4] is not None:
+            pending = await _cube_room_by_id_on(_db, gen_id, run[4])
+            if pending and pending.resolved_at is not None:
+                pending = None
+        cur = await _db.execute(
+            """SELECT r.room_id, r.row_no, r.column_no, r.kind, r.effect_kind
+               FROM cube_run_visits v
+               JOIN cube_rooms r
+                 ON r.generation_id = ? AND r.room_id = v.room_id
+               WHERE v.run_id = ?
+               ORDER BY r.row_no, r.column_no, r.room_id""",
+            (gen_id, run[0]),
+        )
+        visited_rows = await cur.fetchall()
+        visited_positions = {
+            item[0]: (item[1], item[2]) for item in visited_rows
+        }
+        exits_by_room = {room_id: set() for room_id in visited_positions}
+        if visited_positions:
+            cur = await _db.execute(
+                """SELECT p.room_a, p.room_b,
+                          a.row_no, a.column_no, b.row_no, b.column_no
+                   FROM cube_passages p
+                   JOIN cube_rooms a
+                     ON a.generation_id = p.generation_id
+                    AND a.room_id = p.room_a
+                   JOIN cube_rooms b
+                     ON b.generation_id = p.generation_id
+                    AND b.room_id = p.room_b
+                   WHERE p.generation_id = ?""",
+                (gen_id,),
+            )
+            for room_a, room_b, row_a, column_a, row_b, column_b in (
+                await cur.fetchall()
+            ):
+                direction_a = _CUBE_DIRECTION_BY_DELTA.get(
+                    (row_b - row_a, column_b - column_a)
+                )
+                direction_b = _CUBE_DIRECTION_BY_DELTA.get(
+                    (row_a - row_b, column_a - column_b)
+                )
+                if direction_a is None or direction_b is None:
+                    raise RuntimeError("cube passage connects non-adjacent rooms")
+                if room_a in exits_by_room:
+                    exits_by_room[room_a].add(direction_a)
+                if room_b in exits_by_room:
+                    exits_by_room[room_b].add(direction_b)
+        map_rooms = [
+            CubeMapRoomView(
+                room_id=item[0],
+                row=item[1],
+                column=item[2],
+                kind=item[3],
+                effect_kind=item[4],
+                exits=frozenset(exits_by_room[item[0]]),
+            )
+            for item in visited_rows
+        ]
+        explored_count = len(map_rooms)
+        for direction in _CUBE_DIRECTIONS:
+            target = await _cube_target_on(_db, gen_id, run[3], direction)
+            if not target:
+                directions.append(CubeDirectionView(direction, False))
+                continue
+            observation = None
+            if target.revealed_at is None:
+                cur = await _db.execute(
+                    """SELECT category FROM cube_observations
+                       WHERE generation_id = ? AND tg_id = ?
+                         AND source_room_id = ? AND direction = ?""",
+                    (gen_id, tg_id, run[3], direction),
+                )
+                observation = await cur.fetchone()
+            # Тёмная камера оставляет сами двери доступными, но глушит коды и
+            # категории соседей на текущем экране. Глобальное revealed_at —
+            # прежняя командная механика подсказок; оно влияет на подпись, но
+            # никогда не добавляет комнату в личные map_rooms.
+            dark_room = bool(
+                room
+                and effect_has_behavior(
+                    room.effect_kind, EffectBehavior.DARKEN_VIEW
+                )
+            )
+            known = target.revealed_at is not None and not dark_room
+            category = (
+                _cube_category(target.kind, target.effect_kind)
+                if known
+                else observation[0] if observation and not dark_room else None
+            )
+            directions.append(
+                CubeDirectionView(
+                    direction=direction,
+                    exists=True,
+                    room_id=target.room_id,
+                    room_code=target.code if known else None,
+                    category=category,
+                    hazard_active=bool(
+                        category == "hazard" and target.resolved_at is None
+                    ),
+                )
+            )
+
+    return CubeView(
+        generation_id=gen_id,
+        generation_status=generation[1],
+        created_at=generation[2],
+        idle_expires_at=generation[3],
+        lobby_closes_at=generation[4],
+        closes_at=generation[5],
+        roster_locked=generation[6] is not None,
+        participant_count=participant_count,
+        prize_amount=prize_amount,
+        entry_cost=generation[7],
+        prize_per_participant=generation[8],
+        max_participants=generation[9],
+        balance=profile[0] if profile else None,
+        run_id=run[0] if run else None,
+        run_status=run[1] if run else None,
+        run_version=run[2] if run else None,
+        current_room_id=run[3] if run else None,
+        room_code=room.code if room else None,
+        room_kind=room.kind if room else None,
+        room_description_key=room.description_key if room else None,
+        room_effect_kind=room.effect_kind if room else None,
+        room_effect_arg=room.effect_arg if room else None,
+        room_hazard_kind=room.hazard_kind if room else None,
+        room_hazard_resolved=bool(
+            room and room.hazard_kind is not None and room.resolved_at is not None
+        ),
+        room_resolved_by_nick=(
+            resolved_by_nick if room and room.hazard_kind is not None else None
+        ),
+        subscription_id=subscription[0] if subscription else None,
+        subscription_generation_id=subscription[1] if subscription else None,
+        pending_hazard_room_id=pending.room_id if pending else None,
+        pending_hazard_kind=pending.hazard_kind if pending else None,
+        explored_count=explored_count,
+        directions=tuple(directions),
+        map_size=generation[12],
+        map_rooms=tuple(map_rooms),
+        roommates=tuple(roommates),
+        layout_version=generation[13],
+    )
+
+
+async def _cube_enter_snapshot_on(
+    connection: aiosqlite.Connection,
+    *,
+    status: CubeEnterStatus,
+    generation_id: int,
+    tg_id: int,
+    run_id: int | None = None,
+) -> CubeEnterResult:
+    version = None
+    if run_id is not None:
+        cur = await connection.execute(
+            "SELECT version FROM cube_runs WHERE id = ?", (run_id,)
+        )
+        row = await cur.fetchone()
+        version = row[0] if row else None
+    cur = await connection.execute(
+        """SELECT participant_count, prize_amount, prize_per_participant
+           FROM cube_generations WHERE id = ?""",
+        (generation_id,),
+    )
+    generation = await cur.fetchone()
+    participant_count = 0
+    prize_amount = 0
+    if generation:
+        cur = await connection.execute(
+            "SELECT COUNT(*) FROM cube_runs WHERE generation_id = ?",
+            (generation_id,),
+        )
+        live_count = (await cur.fetchone())[0]
+        participant_count = (
+            generation[0] if generation[0] is not None else live_count
+        )
+        prize_amount = (
+            generation[1]
+            if generation[1] is not None
+            else participant_count * generation[2]
+        )
+    cur = await connection.execute(
+        "SELECT zbucks FROM profiles WHERE tg_id = ?", (tg_id,)
+    )
+    profile = await cur.fetchone()
+    return CubeEnterResult(
+        status=status,
+        generation_id=generation_id,
+        run_id=run_id,
+        version=version,
+        participant_count=participant_count,
+        prize_amount=prize_amount,
+        balance=profile[0] if profile else 0,
+    )
+
+
+async def enter_cube(
+    generation_id: int,
+    tg_id: int,
+    request_key: str,
+    next_spec: object,
+    *,
+    clock: Callable[[], datetime] | None = None,
+) -> CubeEnterResult:
+    """Идемпотентно принять взнос и открыть active-run в стартовой комнате."""
+    if not request_key:
+        raise ValueError("request_key must not be empty")
+    async with _economy_lock:
+        connection = _economy_connection()
+        await connection.execute("BEGIN IMMEDIATE")
+        try:
+            cur = await connection.execute(
+                """SELECT generation_id, tg_id, status, run_id
+                   FROM cube_entry_requests WHERE request_key = ?""",
+                (request_key,),
+            )
+            replay = await cur.fetchone()
+            if replay:
+                if replay[0] != generation_id or replay[1] != tg_id:
+                    result = await _cube_enter_snapshot_on(
+                        connection,
+                        status="invalid",
+                        generation_id=generation_id,
+                        tg_id=tg_id,
+                    )
+                else:
+                    result = await _cube_enter_snapshot_on(
+                        connection,
+                        status=replay[2],
+                        generation_id=generation_id,
+                        tg_id=tg_id,
+                        run_id=replay[3],
+                    )
+                await connection.commit()
+                return result
+
+            current = _cube_effective_now(clock)
+            now_iso = current.isoformat()
+            await _advance_cube_lifecycle_on(connection, current, next_spec)
+            cur = await connection.execute(
+                """SELECT status, active_slot, start_room_id, reset_minutes,
+                          lobby_seconds, entry_cost, max_participants
+                   FROM cube_generations WHERE id = ?""",
+                (generation_id,),
+            )
+            generation = await cur.fetchone()
+            if not generation or generation[1] != 1 or generation[0] in ("won", "expired"):
+                status: CubeEnterStatus = "closed"
+                run_id = None
+            else:
+                cur = await connection.execute(
+                    """SELECT id, current_room_id FROM cube_runs
+                       WHERE generation_id = ? AND tg_id = ? AND status = 'active'""",
+                    (generation_id, tg_id),
+                )
+                existing_run = await cur.fetchone()
+                if existing_run:
+                    status = "resumed"
+                    run_id = existing_run[0]
+                    await _record_cube_visit_on(
+                        connection, run_id, existing_run[1], now_iso
+                    )
+                elif generation[0] not in ("waiting", "lobby"):
+                    status = "not_recruiting"
+                    run_id = None
+                else:
+                    cur = await connection.execute(
+                        "SELECT zbucks, dirty FROM profiles WHERE tg_id = ?", (tg_id,)
+                    )
+                    profile = await cur.fetchone()
+                    if not profile:
+                        status = "no_profile"
+                        run_id = None
+                    else:
+                        cur = await connection.execute(
+                            "SELECT COUNT(*) FROM cube_runs WHERE generation_id = ?",
+                            (generation_id,),
+                        )
+                        participants = (await cur.fetchone())[0]
+                        if participants >= generation[6]:
+                            status = "full"
+                            run_id = None
+                        else:
+                            balance, dirty = profile[0], profile[1] or 0
+                            # Cube lifecycle timestamps are UTC, while the
+                            # existing hide-money cooldown contract stores
+                            # naive local ``datetime.now()`` values. Keep the
+                            # two clocks separate so a timezone offset cannot
+                            # prolong or prematurely end an active hiding.
+                            hidden = await _hidden_amount_on(
+                                connection, tg_id, datetime.now()
+                            )
+                            if balance - hidden < generation[5]:
+                                status = "insufficient"
+                                run_id = None
+                            else:
+                                dirty_spend = min(
+                                    generation[5], max(0, dirty - hidden)
+                                )
+                                await connection.execute(
+                                    """UPDATE profiles
+                                       SET zbucks = zbucks - ?, dirty = dirty - ?
+                                       WHERE tg_id = ?""",
+                                    (generation[5], dirty_spend, tg_id),
+                                )
+                                cur = await connection.execute(
+                                    """INSERT INTO cube_runs
+                                       (generation_id, tg_id, entry_request_key,
+                                        status, current_room_id, version, steps,
+                                        paid_amount, dirty_amount, entered_at,
+                                        updated_at)
+                                       VALUES (?, ?, ?, 'active', ?, 0, 0, ?, ?, ?, ?)""",
+                                    (
+                                        generation_id,
+                                        tg_id,
+                                        request_key,
+                                        generation[2],
+                                        generation[5],
+                                        dirty_spend,
+                                        now_iso,
+                                        now_iso,
+                                    ),
+                                )
+                                run_id = cur.lastrowid
+                                if run_id is None:
+                                    raise RuntimeError("cube run insert returned no id")
+                                await _record_cube_visit_on(
+                                    connection, run_id, generation[2], now_iso
+                                )
+                                await connection.execute(
+                                    """UPDATE cube_rooms
+                                       SET revealed_at = COALESCE(revealed_at, ?),
+                                           revealed_by = COALESCE(revealed_by, ?)
+                                       WHERE generation_id = ? AND room_id = ?""",
+                                    (now_iso, tg_id, generation_id, generation[2]),
+                                )
+                                participants += 1
+                                if generation[0] == "waiting":
+                                    lobby_closes_at = (
+                                        current + timedelta(seconds=generation[4])
+                                    ).isoformat()
+                                    closes_at = (
+                                        current + timedelta(minutes=generation[3])
+                                    ).isoformat()
+                                    await connection.execute(
+                                        """UPDATE cube_generations
+                                           SET status = 'lobby',
+                                               recruitment_started_at = ?,
+                                               lobby_closes_at = ?, closes_at = ?
+                                           WHERE id = ? AND status = 'waiting'""",
+                                        (
+                                            now_iso,
+                                            lobby_closes_at,
+                                            closes_at,
+                                            generation_id,
+                                        ),
+                                    )
+                                if participants >= generation[6]:
+                                    await _lock_cube_roster_on(
+                                        connection, generation_id, now_iso
+                                    )
+                                status = "entered"
+
+            await connection.execute(
+                """INSERT INTO cube_entry_requests
+                   (request_key, generation_id, tg_id, status, run_id, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (request_key, generation_id, tg_id, status, run_id, now_iso),
+            )
+            result = await _cube_enter_snapshot_on(
+                connection,
+                status=status,
+                generation_id=generation_id,
+                tg_id=tg_id,
+                run_id=run_id,
+            )
+            await connection.commit()
+            return result
+        except BaseException:
+            await connection.rollback()
+            raise
+
+
+async def _cube_active_run_on(
+    connection: aiosqlite.Connection, generation_id: int, tg_id: int
+) -> CubeRunRecord | None:
+    cur = await connection.execute(
+        """SELECT g.status, g.active_slot, g.prize_room_id, g.layout_version,
+                  r.id, r.status, r.current_room_id, r.previous_room_id,
+                  r.pending_hazard_room_id, r.version
+           FROM cube_generations g
+           LEFT JOIN cube_runs r
+             ON r.generation_id = g.id AND r.tg_id = ?
+           WHERE g.id = ?""",
+        (tg_id, generation_id),
+    )
+    row = await cur.fetchone()
+    if row is None:
+        return None
+    return CubeRunRecord(
+        generation_status=row[0],
+        generation_active=row[1] == 1,
+        prize_room_id=row[2],
+        layout_version=row[3],
+        run_id=row[4],
+        run_status=row[5],
+        current_room_id=row[6],
+        previous_room_id=row[7],
+        pending_hazard_room_id=row[8],
+        version=row[9],
+    )
+
+
+async def observe_cube(
+    generation_id: int,
+    tg_id: int,
+    version: int,
+    direction: str,
+    next_spec: object,
+    *,
+    clock: Callable[[], datetime] | None = None,
+) -> CubeObserveResult:
+    """Сохранить личный снимок соседней комнаты без изменения run-version."""
+    async with _economy_lock:
+        connection = _economy_connection()
+        await connection.execute("BEGIN IMMEDIATE")
+        try:
+            current = _cube_effective_now(clock)
+            await _advance_cube_lifecycle_on(connection, current, next_spec)
+            state = await _cube_active_run_on(connection, generation_id, tg_id)
+            if (
+                not state
+                or not state.generation_active
+                or state.generation_status not in ("lobby", "active")
+            ):
+                result = CubeObserveResult("closed", generation_id, None)
+            elif state.run_id is None or state.run_status != "active":
+                result = CubeObserveResult("no_run", generation_id, None)
+            elif state.version != version:
+                result = CubeObserveResult("stale", generation_id, state.version)
+            else:
+                target = await _cube_target_on(
+                    connection, generation_id, state.current_room_id, direction
+                )
+                if not target:
+                    result = CubeObserveResult(
+                        "wall", generation_id, state.version
+                    )
+                else:
+                    cur = await connection.execute(
+                        """SELECT effect_kind FROM cube_rooms
+                           WHERE generation_id = ? AND room_id = ?""",
+                        (generation_id, state.current_room_id),
+                    )
+                    source_room = await cur.fetchone()
+                    category = (
+                        "unreadable"
+                        if source_room
+                        and effect_has_behavior(
+                            source_room[0], EffectBehavior.DARKEN_VIEW
+                        )
+                        else _cube_category(target.kind, target.effect_kind)
+                    )
+                    await connection.execute(
+                        """INSERT INTO cube_observations
+                           (generation_id, tg_id, source_room_id, direction,
+                            target_room_id, category, observed_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?)
+                           ON CONFLICT (generation_id, tg_id, source_room_id, direction)
+                           DO NOTHING""",
+                        (
+                            generation_id,
+                            tg_id,
+                            state.current_room_id,
+                            direction,
+                            target.room_id,
+                            category,
+                            current.isoformat(),
+                        ),
+                    )
+                    cur = await connection.execute(
+                        """SELECT target_room_id, category FROM cube_observations
+                           WHERE generation_id = ? AND tg_id = ?
+                             AND source_room_id = ? AND direction = ?""",
+                        (
+                            generation_id,
+                            tg_id,
+                            state.current_room_id,
+                            direction,
+                        ),
+                    )
+                    saved = await cur.fetchone()
+                    result = CubeObserveResult(
+                        "observed", generation_id, state.version, saved[0], saved[1]
+                    )
+            await connection.commit()
+            return result
+        except BaseException:
+            await connection.rollback()
+            raise
+
+
+async def _enter_cube_room_on(
+    connection: aiosqlite.Connection,
+    *,
+    generation_id: int,
+    tg_id: int,
+    run_id: int,
+    source_room_id: int,
+    target: CubeRoomRecord,
+    current: datetime,
+) -> CubeRoomEntryOutcome:
+    """Раскрыть комнату, применить максимум один эффект, обновить run."""
+    now_iso = current.isoformat()
+    target_room_id = target.room_id
+    await connection.execute(
+        """UPDATE cube_rooms
+           SET revealed_at = COALESCE(revealed_at, ?),
+               revealed_by = COALESCE(revealed_by, ?)
+           WHERE generation_id = ? AND room_id = ?""",
+        (now_iso, tg_id, generation_id, target_room_id),
+    )
+    await _record_cube_visit_on(connection, run_id, target_room_id, now_iso)
+    effect_kind = target.effect_kind
+    effect = effect_definition(effect_kind)
+    if effect_kind is not None and effect is None:
+        raise RuntimeError(f"unknown Cube effect: {effect_kind}")
+    final_room_id = target_room_id
+    move_status = "moved"
+    if (
+        effect is not None
+        and effect.behavior is EffectBehavior.BOUNCE_ONCE
+        and target.resolved_at is None
+    ):
+        await connection.execute(
+            """UPDATE cube_rooms SET resolved_at = ?, resolved_by = ?
+               WHERE generation_id = ? AND room_id = ? AND resolved_at IS NULL""",
+            (now_iso, tg_id, generation_id, target_room_id),
+        )
+        final_room_id = source_room_id
+        move_status = "bounced"
+    elif effect is not None and effect.behavior is EffectBehavior.BOUNCE_ONCE:
+        # The globally spent echo behaves like an ordinary room. Returning
+        # the effect here would make the UI claim that a bounce still happened.
+        effect_kind = None
+    elif (
+        effect is not None
+        and effect.behavior is EffectBehavior.REVEAL_NEIGHBOR
+        and target.effect_target_room_id is not None
+        and target.effect_arg in _CUBE_DIRECTIONS
+    ):
+        cur = await connection.execute(
+            """SELECT kind, effect_kind FROM cube_rooms
+               WHERE generation_id = ? AND room_id = ?""",
+            (generation_id, target.effect_target_room_id),
+        )
+        hinted_room = await cur.fetchone()
+        if hinted_room:
+            await connection.execute(
+                """INSERT INTO cube_observations
+                   (generation_id, tg_id, source_room_id, direction,
+                    target_room_id, category, observed_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT (generation_id, tg_id, source_room_id, direction)
+                   DO NOTHING""",
+                (
+                    generation_id,
+                    tg_id,
+                    target_room_id,
+                    target.effect_arg,
+                    target.effect_target_room_id,
+                    _cube_category(hinted_room[0], hinted_room[1]),
+                    now_iso,
+                ),
+            )
+    elif (
+        effect is not None
+        and effect.behavior is EffectBehavior.TRANSFER
+        and target.effect_target_room_id is not None
+    ):
+        final_room_id = target.effect_target_room_id
+        await connection.execute(
+            """UPDATE cube_rooms
+               SET revealed_at = COALESCE(revealed_at, ?),
+                   revealed_by = COALESCE(revealed_by, ?)
+               WHERE generation_id = ? AND room_id = ?""",
+            (now_iso, tg_id, generation_id, final_room_id),
+        )
+        await _record_cube_visit_on(connection, run_id, final_room_id, now_iso)
+    await connection.execute(
+        """UPDATE cube_runs
+           SET previous_room_id = current_room_id, current_room_id = ?,
+               pending_hazard_room_id = NULL, version = version + 1,
+               steps = steps + 1, updated_at = ?
+           WHERE id = ?""",
+        (final_room_id, now_iso, run_id),
+    )
+    cur = await connection.execute(
+        "SELECT version FROM cube_runs WHERE id = ?", (run_id,)
+    )
+    new_version = (await cur.fetchone())[0]
+    return CubeRoomEntryOutcome(
+        status=move_status,
+        final_room_id=final_room_id,
+        effect_kind=effect_kind,
+        effect_arg=target.effect_arg,
+        version=new_version,
+    )
+
+
+async def _settle_cube_win_on(
+    connection: aiosqlite.Connection,
+    *,
+    generation_id: int,
+    tg_id: int,
+    run_id: int,
+    prize_room_id: int,
+    current: datetime,
+    next_spec: object,
+) -> tuple[int, int, int]:
+    now_iso = current.isoformat()
+    participant_count, prize_amount = await _lock_cube_roster_on(
+        connection, generation_id, now_iso
+    )
+    cur = await connection.execute(
+        "SELECT zbucks FROM profiles WHERE tg_id = ?", (tg_id,)
+    )
+    profile = await cur.fetchone()
+    if not profile:
+        raise RuntimeError("cube winner profile disappeared")
+    balance_before = profile[0]
+    balance_after = balance_before + prize_amount
+    await connection.execute(
+        "UPDATE profiles SET zbucks = zbucks + ? WHERE tg_id = ?",
+        (prize_amount, tg_id),
+    )
+    cur = await connection.execute(
+        """UPDATE cube_generations
+           SET status = 'won', active_slot = NULL,
+               participant_count = ?, prize_amount = ?, winner_tg_id = ?,
+               winner_balance_before = ?, winner_balance_after = ?,
+               finished_at = ?, finish_reason = 'prize_found'
+           WHERE id = ? AND active_slot = 1 AND status IN ('lobby','active')""",
+        (
+            participant_count,
+            prize_amount,
+            tg_id,
+            balance_before,
+            balance_after,
+            now_iso,
+            generation_id,
+        ),
+    )
+    if cur.rowcount != 1:
+        raise RuntimeError("cube generation was won concurrently")
+    await connection.execute(
+        """UPDATE cube_runs
+           SET status = 'lost', updated_at = ?
+           WHERE generation_id = ? AND status = 'active' AND id != ?""",
+        (now_iso, generation_id, run_id),
+    )
+    await connection.execute(
+        """UPDATE cube_runs
+           SET status = 'won', previous_room_id = current_room_id,
+               current_room_id = ?, pending_hazard_room_id = NULL,
+               version = version + 1, steps = steps + 1,
+               updated_at = ?, won_at = ?
+           WHERE id = ? AND status = 'active'""",
+        (prize_room_id, now_iso, now_iso, run_id),
+    )
+    await connection.execute(
+        """UPDATE cube_rooms
+           SET revealed_at = COALESCE(revealed_at, ?),
+               revealed_by = COALESCE(revealed_by, ?)
+           WHERE generation_id = ? AND room_id = ?""",
+        (now_iso, tg_id, generation_id, prize_room_id),
+    )
+    await _record_cube_visit_on(connection, run_id, prize_room_id, now_iso)
+    await connection.execute(
+        """INSERT OR IGNORE INTO cube_notifications
+           (generation_id, kind, recipient_tg_id, subscription_id,
+            next_attempt_at, created_at)
+           VALUES (?, 'winner_public', NULL, NULL, ?, ?)""",
+        (generation_id, now_iso, now_iso),
+    )
+    next_generation_id = await _insert_cube_generation_on(
+        connection, next_spec, current
+    )
+    return prize_amount, balance_after, next_generation_id
+
+
+async def move_cube(
+    generation_id: int,
+    tg_id: int,
+    version: int,
+    direction: str,
+    next_spec: object,
+    *,
+    clock: Callable[[], datetime] | None = None,
+) -> CubeMoveResult:
+    """Атомарно выполнить ровно один переход либо оформить победу."""
+    async with _economy_lock:
+        connection = _economy_connection()
+        await connection.execute("BEGIN IMMEDIATE")
+        try:
+            current = _cube_effective_now(clock)
+            await _advance_cube_lifecycle_on(connection, current, next_spec)
+            state = await _cube_active_run_on(connection, generation_id, tg_id)
+            if (
+                not state
+                or not state.generation_active
+                or state.generation_status not in ("lobby", "active")
+            ):
+                result = CubeMoveResult("closed", generation_id, None)
+            elif state.run_id is None or state.run_status != "active":
+                result = CubeMoveResult("no_run", generation_id, None)
+            elif state.version != version:
+                result = CubeMoveResult("stale", generation_id, state.version)
+            else:
+                target = await _cube_target_on(
+                    connection, generation_id, state.current_room_id, direction
+                )
+                if not target:
+                    result = CubeMoveResult("wall", generation_id, state.version)
+                elif target.kind == "hazard" and target.resolved_at is None:
+                    now_iso = current.isoformat()
+                    await connection.execute(
+                        """UPDATE cube_rooms
+                           SET revealed_at = COALESCE(revealed_at, ?),
+                               revealed_by = COALESCE(revealed_by, ?)
+                           WHERE generation_id = ? AND room_id = ?""",
+                        (now_iso, tg_id, generation_id, target.room_id),
+                    )
+                    await _record_cube_visit_on(
+                        connection, state.run_id, target.room_id, now_iso
+                    )
+                    await connection.execute(
+                        """UPDATE cube_runs
+                           SET pending_hazard_room_id = ?, version = version + 1,
+                               updated_at = ? WHERE id = ?""",
+                        (target.room_id, now_iso, state.run_id),
+                    )
+                    cur = await connection.execute(
+                        "SELECT version FROM cube_runs WHERE id = ?", (state.run_id,)
+                    )
+                    new_version = (await cur.fetchone())[0]
+                    result = CubeMoveResult(
+                        "hazard",
+                        generation_id,
+                        new_version,
+                        entered_room_id=target.room_id,
+                        final_room_id=state.current_room_id,
+                        target_room_id=target.room_id,
+                    )
+                elif target.room_id == state.prize_room_id or target.kind == "prize":
+                    prize, _balance, next_generation_id = await _settle_cube_win_on(
+                        connection,
+                        generation_id=generation_id,
+                        tg_id=tg_id,
+                        run_id=state.run_id,
+                        prize_room_id=target.room_id,
+                        current=current,
+                        next_spec=next_spec,
+                    )
+                    cur = await connection.execute(
+                        "SELECT version FROM cube_runs WHERE id = ?", (state.run_id,)
+                    )
+                    new_version = (await cur.fetchone())[0]
+                    result = CubeMoveResult(
+                        "won",
+                        generation_id,
+                        new_version,
+                        entered_room_id=target.room_id,
+                        final_room_id=target.room_id,
+                        prize_amount=prize,
+                        next_generation_id=next_generation_id,
+                    )
+                else:
+                    entered = await _enter_cube_room_on(
+                        connection,
+                        generation_id=generation_id,
+                        tg_id=tg_id,
+                        run_id=state.run_id,
+                        source_room_id=state.current_room_id,
+                        target=target,
+                        current=current,
+                    )
+                    result = CubeMoveResult(
+                        entered.status,
+                        generation_id,
+                        entered.version,
+                        entered_room_id=target.room_id,
+                        final_room_id=entered.final_room_id,
+                        effect_kind=entered.effect_kind,
+                        effect_arg=entered.effect_arg,
+                    )
+            await connection.commit()
+            return result
+        except BaseException:
+            await connection.rollback()
+            raise
+
+
+async def _finish_cube_hazard_attempt_on(
+    connection: aiosqlite.Connection,
+    run_id: int,
+    updated_at: str,
+    *,
+    clear_pending: bool,
+) -> int:
+    """Инвалидировать кнопки выбора и при необходимости вернуть обычный экран."""
+    if clear_pending:
+        await connection.execute(
+            """UPDATE cube_runs
+               SET pending_hazard_room_id = NULL, version = version + 1,
+                   updated_at = ?
+               WHERE id = ?""",
+            (updated_at, run_id),
+        )
+    else:
+        await connection.execute(
+            """UPDATE cube_runs
+               SET version = version + 1, updated_at = ?
+               WHERE id = ?""",
+            (updated_at, run_id),
+        )
+    cur = await connection.execute(
+        "SELECT version FROM cube_runs WHERE id = ?", (run_id,)
+    )
+    row = await cur.fetchone()
+    if row is None:
+        raise RuntimeError("cube run disappeared during hazard attempt")
+    return row[0]
+
+
+async def resolve_cube_hazard_and_enter(
+    generation_id: int,
+    tg_id: int,
+    version: int,
+    selected_item_key: str,
+    next_spec: object,
+    *,
+    clock: Callable[[], datetime] | None = None,
+) -> CubeActionResult:
+    """Проверить выбранный предмет и при успехе обезвредить ловушку с входом."""
+    selected_item = cube_item_use(selected_item_key)
+    if selected_item is None:
+        raise ValueError("selected_item_key must be a Cube hazard item")
+
+    async with _economy_lock:
+        connection = _economy_connection()
+        await connection.execute("BEGIN IMMEDIATE")
+        try:
+            current = _cube_effective_now(clock)
+            now_iso = current.isoformat()
+            await _advance_cube_lifecycle_on(connection, current, next_spec)
+            state = await _cube_active_run_on(connection, generation_id, tg_id)
+            if (
+                not state
+                or not state.generation_active
+                or state.generation_status not in ("lobby", "active")
+            ):
+                result = CubeActionResult("closed", generation_id, None)
+            elif state.run_id is None or state.run_status != "active":
+                result = CubeActionResult("no_run", generation_id, None)
+            elif state.version != version:
+                result = CubeActionResult("stale", generation_id, state.version)
+            elif selected_item_key not in layout_item_keys(state.layout_version):
+                result = CubeActionResult("invalid", generation_id, state.version)
+            elif state.pending_hazard_room_id is None:
+                result = CubeActionResult("invalid", generation_id, state.version)
+            else:
+                target_room_id = state.pending_hazard_room_id
+                target = None
+                for direction in _CUBE_DIRECTIONS:
+                    candidate = await _cube_target_on(
+                        connection, generation_id, state.current_room_id, direction
+                    )
+                    if candidate and candidate.room_id == target_room_id:
+                        target = candidate
+                        break
+
+                hazard = hazard_definition(target.hazard_kind if target else None)
+                if (
+                    not target
+                    or target.kind != "hazard"
+                    or hazard is None
+                    or target.required_item_key is None
+                ):
+                    result = CubeActionResult(
+                        "invalid", generation_id, state.version, target_room_id
+                    )
+                elif target.resolved_at is not None:
+                    new_version = await _finish_cube_hazard_attempt_on(
+                        connection, state.run_id, now_iso, clear_pending=True
+                    )
+                    result = CubeActionResult(
+                        "already_resolved",
+                        generation_id,
+                        new_version,
+                        target_room_id,
+                        hazard_kind=target.hazard_kind,
+                        selected_item_key=selected_item_key,
+                    )
+                elif not await _has_item_on(
+                    connection,
+                    tg_id,
+                    selected_item_key,
+                    max(1, selected_item.wrong_consume_qty),
+                ):
+                    # Наличие проверяется до сравнения с ответом: отсутствие
+                    # предмета не должно подсказывать, был ли выбор правильным.
+                    new_version = await _finish_cube_hazard_attempt_on(
+                        connection, state.run_id, now_iso, clear_pending=False
+                    )
+                    result = CubeActionResult(
+                        "missing_item",
+                        generation_id,
+                        new_version,
+                        target_room_id,
+                        hazard_kind=target.hazard_kind,
+                        selected_item_key=selected_item_key,
+                    )
+                elif selected_item_key != target.required_item_key:
+                    # Ошибка всегда стоит выбранного предмета: расходник
+                    # тратится, а многоразовый инструмент ломается. Списание и
+                    # возврат к обычной навигации остаются одним commit.
+                    if not await _take_item_on(
+                        connection,
+                        tg_id,
+                        selected_item_key,
+                        selected_item.wrong_consume_qty,
+                    ):
+                        raise RuntimeError(
+                            "cube selected item disappeared inside writer transaction"
+                        )
+                    new_version = await _finish_cube_hazard_attempt_on(
+                        connection, state.run_id, now_iso, clear_pending=True
+                    )
+                    result = CubeActionResult(
+                        "wrong_item",
+                        generation_id,
+                        new_version,
+                        target_room_id,
+                        consume_qty=selected_item.wrong_consume_qty,
+                        hazard_kind=target.hazard_kind,
+                        selected_item_key=selected_item_key,
+                    )
+                else:
+                    required_item = target.required_item_key
+                    consume_qty = target.consume_qty
+                    cur = await connection.execute(
+                        """UPDATE cube_rooms
+                           SET resolved_at = ?, resolved_by = ?,
+                               revealed_at = COALESCE(revealed_at, ?),
+                               revealed_by = COALESCE(revealed_by, ?)
+                           WHERE generation_id = ? AND room_id = ?
+                             AND resolved_at IS NULL""",
+                        (
+                            now_iso,
+                            tg_id,
+                            now_iso,
+                            tg_id,
+                            generation_id,
+                            target_room_id,
+                        ),
+                    )
+                    if cur.rowcount != 1:
+                        new_version = await _finish_cube_hazard_attempt_on(
+                            connection, state.run_id, now_iso, clear_pending=True
+                        )
+                        result = CubeActionResult(
+                            "already_resolved",
+                            generation_id,
+                            new_version,
+                            target_room_id,
+                            hazard_kind=target.hazard_kind,
+                            selected_item_key=selected_item_key,
+                        )
+                    else:
+                        if consume_qty and not await _take_item_on(
+                            connection,
+                            tg_id,
+                            required_item,
+                            consume_qty,
+                        ):
+                            raise RuntimeError(
+                                "cube inventory changed inside writer transaction"
+                            )
+                        entered = await _enter_cube_room_on(
+                            connection,
+                            generation_id=generation_id,
+                            tg_id=tg_id,
+                            run_id=state.run_id,
+                            source_room_id=state.current_room_id,
+                            target=target,
+                            current=current,
+                        )
+                        result = CubeActionResult(
+                            "resolved_and_moved",
+                            generation_id,
+                            entered.version,
+                            target_room_id,
+                            entered.final_room_id,
+                            entered.effect_kind,
+                            required_item,
+                            consume_qty,
+                            target.hazard_kind,
+                            selected_item_key,
+                        )
+            await connection.commit()
+            return result
+        except BaseException:
+            await connection.rollback()
+            raise
+
+
+async def retreat_cube_hazard(
+    generation_id: int,
+    tg_id: int,
+    version: int,
+    next_spec: object,
+    *,
+    clock: Callable[[], datetime] | None = None,
+) -> CubeActionResult:
+    """Отказаться от выбора предмета и вернуться к навигации текущей комнаты."""
+    async with _economy_lock:
+        connection = _economy_connection()
+        await connection.execute("BEGIN IMMEDIATE")
+        try:
+            current = _cube_effective_now(clock)
+            await _advance_cube_lifecycle_on(connection, current, next_spec)
+            state = await _cube_active_run_on(connection, generation_id, tg_id)
+            if (
+                not state
+                or not state.generation_active
+                or state.generation_status not in ("lobby", "active")
+            ):
+                result = CubeActionResult("closed", generation_id, None)
+            elif state.run_id is None or state.run_status != "active":
+                result = CubeActionResult("no_run", generation_id, None)
+            elif state.version != version:
+                result = CubeActionResult("stale", generation_id, state.version)
+            elif state.pending_hazard_room_id is None:
+                result = CubeActionResult("invalid", generation_id, state.version)
+            else:
+                target_room_id = state.pending_hazard_room_id
+                new_version = await _finish_cube_hazard_attempt_on(
+                    connection,
+                    state.run_id,
+                    current.isoformat(),
+                    clear_pending=True,
+                )
+                result = CubeActionResult(
+                    "retreated", generation_id, new_version, target_room_id
+                )
+            await connection.commit()
+            return result
+        except BaseException:
+            await connection.rollback()
+            raise
+
+
+async def subscribe_cube(
+    generation_id: int,
+    tg_id: int,
+    request_key: str,
+    next_spec: object,
+    *,
+    clock: Callable[[], datetime] | None = None,
+) -> CubeNotifyResult:
+    """Идемпотентно подписать игрока на первое следующее поколение."""
+    if not request_key:
+        raise ValueError("request_key must not be empty")
+    async with _economy_lock:
+        connection = _economy_connection()
+        await connection.execute("BEGIN IMMEDIATE")
+        try:
+            cur = await connection.execute(
+                """SELECT generation_id, tg_id, subscription_id, status
+                   FROM cube_subscription_requests WHERE request_key = ?""",
+                (request_key,),
+            )
+            replay = await cur.fetchone()
+            if replay:
+                if replay[0] != generation_id or replay[1] != tg_id:
+                    result = CubeNotifyResult("invalid", generation_id, None)
+                elif replay[3] == "active":
+                    result = CubeNotifyResult(
+                        "already_subscribed", generation_id, replay[2]
+                    )
+                else:
+                    result = CubeNotifyResult("stale", generation_id, replay[2])
+                await connection.commit()
+                return result
+
+            current = _cube_effective_now(clock)
+            now_iso = current.isoformat()
+            await _advance_cube_lifecycle_on(connection, current, next_spec)
+            cur = await connection.execute(
+                """SELECT status, active_slot FROM cube_generations
+                   WHERE id = ?""",
+                (generation_id,),
+            )
+            source_generation = await cur.fetchone()
+            cur = await connection.execute(
+                "SELECT 1 FROM profiles WHERE tg_id = ?", (tg_id,)
+            )
+            profile = await cur.fetchone()
+            if not profile:
+                result = CubeNotifyResult("invalid", generation_id, None)
+                await connection.commit()
+                return result
+            if (
+                not source_generation
+                or source_generation[0] != "active"
+                or source_generation[1] != 1
+            ):
+                result = CubeNotifyResult("stale", generation_id, None)
+                await connection.commit()
+                return result
+            cur = await connection.execute(
+                """SELECT 1 FROM cube_runs
+                   WHERE generation_id = ? AND tg_id = ? AND status = 'active'""",
+                (generation_id, tg_id),
+            )
+            if await cur.fetchone():
+                result = CubeNotifyResult("invalid", generation_id, None)
+                await connection.commit()
+                return result
+
+            cur = await connection.execute(
+                """SELECT id, requested_after_generation_id
+                   FROM cube_waitlist WHERE tg_id = ?""",
+                (tg_id,),
+            )
+            existing = await cur.fetchone()
+            if existing:
+                subscription_id = existing[0]
+                notify_status: CubeNotifyStatus = "already_subscribed"
+            else:
+                cur = await connection.execute(
+                    """INSERT INTO cube_waitlist
+                       (tg_id, requested_after_generation_id, request_key, requested_at)
+                       VALUES (?, ?, ?, ?)""",
+                    (tg_id, generation_id, request_key, now_iso),
+                )
+                subscription_id = cur.lastrowid
+                notify_status = "subscribed"
+
+            await connection.execute(
+                """INSERT INTO cube_subscription_requests
+                   (request_key, generation_id, tg_id, subscription_id, status,
+                    created_at, updated_at)
+                   VALUES (?, ?, ?, ?, 'active', ?, ?)""",
+                (
+                    request_key,
+                    generation_id,
+                    tg_id,
+                    subscription_id,
+                    now_iso,
+                    now_iso,
+                ),
+            )
+            # Если следующее waiting/lobby уже успело появиться, подписка не
+            # ждёт ещё одно поколение: сразу материализуем durable invite.
+            cur = await connection.execute(
+                """SELECT id FROM cube_generations
+                   WHERE active_slot = 1 AND status IN ('waiting','lobby')
+                     AND id > ? ORDER BY id DESC LIMIT 1""",
+                (generation_id,),
+            )
+            current_generation = await cur.fetchone()
+            if current_generation:
+                await connection.execute(
+                    """INSERT OR IGNORE INTO cube_notifications
+                       (generation_id, kind, recipient_tg_id, subscription_id,
+                        next_attempt_at, created_at)
+                       VALUES (?, 'lobby_private', ?, ?, ?, ?)""",
+                    (
+                        current_generation[0],
+                        tg_id,
+                        subscription_id,
+                        now_iso,
+                        now_iso,
+                    ),
+                )
+            await connection.commit()
+            return CubeNotifyResult(
+                notify_status, generation_id, subscription_id
+            )
+        except BaseException:
+            await connection.rollback()
+            raise
+
+
+async def cancel_cube_subscription(
+    generation_id: int,
+    tg_id: int,
+    subscription_id: int,
+    next_spec: object,
+    *,
+    clock: Callable[[], datetime] | None = None,
+) -> CubeNotifyResult:
+    """Снять только точную версию подписки из callback, не более новую."""
+    async with _economy_lock:
+        connection = _economy_connection()
+        await connection.execute("BEGIN IMMEDIATE")
+        try:
+            current = _cube_effective_now(clock)
+            now_iso = current.isoformat()
+            await _advance_cube_lifecycle_on(connection, current, next_spec)
+            cur = await connection.execute(
+                """SELECT id FROM cube_waitlist
+                   WHERE id = ? AND tg_id = ?
+                     AND requested_after_generation_id = ?""",
+                (subscription_id, tg_id, generation_id),
+            )
+            waitlist = await cur.fetchone()
+            if waitlist:
+                await connection.execute(
+                    "DELETE FROM cube_waitlist WHERE id = ?", (subscription_id,)
+                )
+                await connection.execute(
+                    """UPDATE cube_subscription_requests
+                       SET status = 'cancelled', updated_at = ?
+                       WHERE subscription_id = ? AND tg_id = ? AND status = 'active'""",
+                    (now_iso, subscription_id, tg_id),
+                )
+                await connection.execute(
+                    """UPDATE cube_notifications
+                       SET status = 'cancelled', claim_token = NULL,
+                           claim_until = NULL
+                       WHERE subscription_id = ? AND status = 'pending'""",
+                    (subscription_id,),
+                )
+                result = CubeNotifyResult(
+                    "cancelled", generation_id, subscription_id
+                )
+            else:
+                cur = await connection.execute(
+                    """SELECT status FROM cube_subscription_requests
+                       WHERE subscription_id = ? AND tg_id = ?
+                         AND generation_id = ?
+                       ORDER BY created_at DESC LIMIT 1""",
+                    (subscription_id, tg_id, generation_id),
+                )
+                request = await cur.fetchone()
+                if request and request[0] == "cancelled":
+                    result = CubeNotifyResult(
+                        "cancelled", generation_id, subscription_id
+                    )
+                elif request:
+                    result = CubeNotifyResult(
+                        "stale", generation_id, subscription_id
+                    )
+                else:
+                    result = CubeNotifyResult("invalid", generation_id, None)
+            await connection.commit()
+            return result
+        except BaseException:
+            await connection.rollback()
+            raise
+
+
+def _cube_winner_claim_from_row(
+    row, claim_token: str | None = None
+) -> CubeWinnerClaim:
+    return CubeWinnerClaim(
+        generation_id=row[0],
+        winner_tg_id=row[1],
+        winner_nick=row[2],
+        participant_count=row[3],
+        prize_amount=row[4],
+        winner_balance_before=row[5],
+        winner_balance_after=row[6],
+        claim_token=claim_token,
+    )
+
+
+async def get_cube_winner(generation_id: int) -> CubeWinnerClaim | None:
+    cur = await _db.execute(
+        """SELECT g.id, g.winner_tg_id, p.nick, g.participant_count,
+                  g.prize_amount, g.winner_balance_before,
+                  g.winner_balance_after
+           FROM cube_generations g
+           JOIN profiles p ON p.tg_id = g.winner_tg_id
+           WHERE g.id = ? AND g.status = 'won'""",
+        (generation_id,),
+    )
+    row = await cur.fetchone()
+    return _cube_winner_claim_from_row(row) if row else None
+
+
+async def pending_cube_tax() -> list[CubeWinnerClaim]:
+    cur = await _db.execute(
+        """SELECT g.id, g.winner_tg_id, p.nick, g.participant_count,
+                  g.prize_amount, g.winner_balance_before,
+                  g.winner_balance_after
+           FROM cube_generations g
+           JOIN profiles p ON p.tg_id = g.winner_tg_id
+           WHERE g.status = 'won' AND g.tax_processed_at IS NULL
+           ORDER BY g.id"""
+    )
+    return [_cube_winner_claim_from_row(row) for row in await cur.fetchall()]
+
+
+async def claim_pending_cube_tax(
+    claim_token: str,
+    now_iso: str,
+    claim_until: str,
+    limit: int = 20,
+) -> list[CubeWinnerClaim]:
+    """Арендовать post-commit проверки Густава по выигрышам Куба."""
+    if not claim_token:
+        raise ValueError("claim_token must not be empty")
+    if datetime.fromisoformat(claim_until) <= datetime.fromisoformat(now_iso):
+        raise ValueError("claim_until must be after now_iso")
+    async with _economy_lock:
+        connection = _economy_connection()
+        await connection.execute("BEGIN IMMEDIATE")
+        try:
+            cur = await connection.execute(
+                """SELECT id FROM cube_generations
+                   WHERE status = 'won' AND winner_tg_id IS NOT NULL
+                     AND tax_processed_at IS NULL
+                     AND (tax_claim_until IS NULL OR tax_claim_until <= ?)
+                   ORDER BY id LIMIT ?""",
+                (now_iso, max(1, limit)),
+            )
+            generation_ids = [row[0] for row in await cur.fetchall()]
+            if not generation_ids:
+                await connection.rollback()
+                return []
+            placeholders = ", ".join("?" for _ in generation_ids)
+            await connection.execute(
+                f"""UPDATE cube_generations
+                    SET tax_claim_token = ?, tax_claim_until = ?
+                    WHERE id IN ({placeholders}) AND tax_processed_at IS NULL
+                      AND (tax_claim_until IS NULL OR tax_claim_until <= ?)""",
+                (claim_token, claim_until, *generation_ids, now_iso),
+            )
+            cur = await connection.execute(
+                f"""SELECT g.id, g.winner_tg_id, p.nick,
+                            g.participant_count, g.prize_amount,
+                            g.winner_balance_before, g.winner_balance_after
+                     FROM cube_generations g
+                     JOIN profiles p ON p.tg_id = g.winner_tg_id
+                     WHERE g.id IN ({placeholders}) AND g.tax_claim_token = ?
+                     ORDER BY g.id""",
+                (*generation_ids, claim_token),
+            )
+            jobs = [
+                _cube_winner_claim_from_row(row, claim_token)
+                for row in await cur.fetchall()
+            ]
+            await connection.commit()
+            return jobs
+        except BaseException:
+            await connection.rollback()
+            raise
+
+
+async def cube_tax_claim_is_current(
+    generation_id: int,
+    claim_token: str,
+    now_iso: str,
+) -> bool:
+    """Recheck Gustav lease immediately before its post-commit side effect."""
+    if not claim_token:
+        return False
+    current = datetime.fromisoformat(now_iso)
+    cur = await _db.execute(
+        """SELECT tax_claim_token, tax_claim_until
+           FROM cube_generations
+           WHERE id = ? AND status = 'won' AND tax_processed_at IS NULL""",
+        (generation_id,),
+    )
+    row = await cur.fetchone()
+    return bool(
+        row
+        and row[0] == claim_token
+        and row[1] is not None
+        and datetime.fromisoformat(row[1]) > current
+    )
+
+
+async def mark_cube_tax_processed(
+    generation_id: int,
+    claim_token: str,
+    processed_at: str | None = None,
+) -> bool:
+    async with _economy_lock:
+        connection = _economy_connection()
+        await connection.execute("BEGIN IMMEDIATE")
+        try:
+            cur = await connection.execute(
+                """UPDATE cube_generations
+                   SET tax_processed_at = ?, tax_claim_token = NULL,
+                       tax_claim_until = NULL
+                   WHERE id = ? AND status = 'won'
+                     AND tax_processed_at IS NULL AND tax_claim_token = ?""",
+                (
+                    processed_at or datetime.utcnow().isoformat(),
+                    generation_id,
+                    claim_token,
+                ),
+            )
+            await connection.commit()
+            return cur.rowcount == 1
+        except BaseException:
+            await connection.rollback()
+            raise
+
+
+async def release_cube_tax_claim(
+    generation_id: int, claim_token: str
+) -> bool:
+    async with _economy_lock:
+        connection = _economy_connection()
+        await connection.execute("BEGIN IMMEDIATE")
+        try:
+            cur = await connection.execute(
+                """UPDATE cube_generations
+                   SET tax_claim_token = NULL, tax_claim_until = NULL
+                   WHERE id = ? AND tax_processed_at IS NULL
+                     AND tax_claim_token = ?""",
+                (generation_id, claim_token),
+            )
+            await connection.commit()
+            return cur.rowcount == 1
+        except BaseException:
+            await connection.rollback()
+            raise
+
+
+def _cube_notification_from_row(
+    row, claim_token: str | None = None
+) -> CubeNotification:
+    return CubeNotification(
+        notification_id=row[0],
+        generation_id=row[1],
+        kind=row[2],
+        recipient_tg_id=row[3],
+        subscription_id=row[4],
+        attempts=row[5],
+        next_attempt_at=row[6],
+        winner_tg_id=row[7],
+        winner_nick=row[8],
+        participant_count=row[9],
+        prize_amount=row[10],
+        claim_token=claim_token,
+    )
+
+
+async def cube_notification_claim_is_current(
+    notification_id: int,
+    claim_token: str,
+    now_iso: str,
+) -> bool:
+    """Recheck notification/subscription lease immediately before Telegram."""
+    if not claim_token:
+        return False
+    current = datetime.fromisoformat(now_iso)
+    cur = await _db.execute(
+        """SELECT n.kind, n.subscription_id, n.claim_token, n.claim_until,
+                  w.id, w.claim_token, w.claim_until
+           FROM cube_notifications n
+           LEFT JOIN cube_waitlist w ON w.id = n.subscription_id
+           WHERE n.id = ? AND n.status = 'pending'""",
+        (notification_id,),
+    )
+    row = await cur.fetchone()
+    if (
+        not row
+        or row[2] != claim_token
+        or row[3] is None
+        or datetime.fromisoformat(row[3]) <= current
+    ):
+        return False
+    if row[0] != "lobby_private":
+        return True
+    return bool(
+        row[1] is not None
+        and row[4] == row[1]
+        and row[5] == claim_token
+        and row[6] is not None
+        and datetime.fromisoformat(row[6]) > current
+    )
+
+
+async def claim_cube_notifications(
+    claim_token: str,
+    now_iso: str,
+    claim_until: str,
+    limit: int = 20,
+) -> list[CubeNotification]:
+    """Claim outbox records; private invite also leases its subscription."""
+    if not claim_token:
+        raise ValueError("claim_token must not be empty")
+    if datetime.fromisoformat(claim_until) <= datetime.fromisoformat(now_iso):
+        raise ValueError("claim_until must be after now_iso")
+    async with _economy_lock:
+        connection = _economy_connection()
+        await connection.execute("BEGIN IMMEDIATE")
+        try:
+            cur = await connection.execute(
+                """SELECT n.id, n.kind, n.generation_id, n.recipient_tg_id,
+                          n.subscription_id, g.status,
+                          w.id, w.requested_after_generation_id,
+                          w.claim_until
+                   FROM cube_notifications n
+                   JOIN cube_generations g ON g.id = n.generation_id
+                   LEFT JOIN cube_waitlist w ON w.id = n.subscription_id
+                   WHERE n.status = 'pending' AND n.next_attempt_at <= ?
+                     AND (n.claim_until IS NULL OR n.claim_until <= ?)
+                   ORDER BY n.generation_id DESC, n.id
+                   LIMIT ?""",
+                (now_iso, now_iso, max(1, limit) * 4),
+            )
+            rows = await cur.fetchall()
+            claimed_ids: list[int] = []
+            for row in rows:
+                if len(claimed_ids) >= max(1, limit):
+                    break
+                notification_id, kind, target_generation = row[0], row[1], row[2]
+                if kind == "lobby_private":
+                    valid = (
+                        row[5] in ("waiting", "lobby")
+                        and row[6] == row[4]
+                        and row[7] < target_generation
+                    )
+                    if not valid:
+                        await connection.execute(
+                            """UPDATE cube_notifications
+                               SET status = 'stale', claim_token = NULL,
+                                   claim_until = NULL WHERE id = ?""",
+                            (notification_id,),
+                        )
+                        continue
+                    if row[8] is not None and row[8] > now_iso:
+                        continue
+                    cur = await connection.execute(
+                        """UPDATE cube_waitlist
+                           SET claim_token = ?, claim_until = ?
+                           WHERE id = ?
+                             AND (claim_until IS NULL OR claim_until <= ?)""",
+                        (claim_token, claim_until, row[4], now_iso),
+                    )
+                    if cur.rowcount != 1:
+                        continue
+                cur = await connection.execute(
+                    """UPDATE cube_notifications
+                       SET claim_token = ?, claim_until = ?
+                       WHERE id = ? AND status = 'pending'
+                         AND (claim_until IS NULL OR claim_until <= ?)""",
+                    (claim_token, claim_until, notification_id, now_iso),
+                )
+                if cur.rowcount == 1:
+                    claimed_ids.append(notification_id)
+
+            if not claimed_ids:
+                await connection.commit()
+                return []
+            placeholders = ", ".join("?" for _ in claimed_ids)
+            cur = await connection.execute(
+                f"""SELECT n.id, n.generation_id, n.kind,
+                            n.recipient_tg_id, n.subscription_id, n.attempts,
+                            n.next_attempt_at, g.winner_tg_id, p.nick,
+                            g.participant_count, g.prize_amount
+                     FROM cube_notifications n
+                     JOIN cube_generations g ON g.id = n.generation_id
+                     LEFT JOIN profiles p ON p.tg_id = g.winner_tg_id
+                     WHERE n.id IN ({placeholders}) AND n.claim_token = ?
+                     ORDER BY n.id""",
+                (*claimed_ids, claim_token),
+            )
+            notifications = [
+                _cube_notification_from_row(row, claim_token)
+                for row in await cur.fetchall()
+            ]
+            await connection.commit()
+            return notifications
+        except BaseException:
+            await connection.rollback()
+            raise
+
+
+async def mark_cube_notification_sent(
+    notification_id: int,
+    claim_token: str,
+    sent_at: str | None = None,
+) -> bool:
+    async with _economy_lock:
+        connection = _economy_connection()
+        await connection.execute("BEGIN IMMEDIATE")
+        try:
+            cur = await connection.execute(
+                """SELECT kind, subscription_id, recipient_tg_id
+                   FROM cube_notifications
+                   WHERE id = ? AND status = 'pending' AND claim_token = ?""",
+                (notification_id, claim_token),
+            )
+            notification = await cur.fetchone()
+            if not notification:
+                await connection.rollback()
+                return False
+            completed_at = sent_at or datetime.utcnow().isoformat()
+            await connection.execute(
+                """UPDATE cube_notifications
+                   SET status = 'sent', sent_at = ?, attempts = attempts + 1,
+                       claim_token = NULL, claim_until = NULL
+                   WHERE id = ? AND status = 'pending' AND claim_token = ?""",
+                (completed_at, notification_id, claim_token),
+            )
+            if notification[0] == "lobby_private":
+                await connection.execute(
+                    """DELETE FROM cube_waitlist
+                       WHERE id = ? AND tg_id = ? AND claim_token = ?""",
+                    (notification[1], notification[2], claim_token),
+                )
+                await connection.execute(
+                    """UPDATE cube_subscription_requests
+                       SET status = 'delivered', updated_at = ?
+                       WHERE subscription_id = ? AND tg_id = ?
+                         AND status = 'active'""",
+                    (completed_at, notification[1], notification[2]),
+                )
+                await connection.execute(
+                    """UPDATE cube_notifications SET status = 'stale'
+                       WHERE subscription_id = ? AND id != ?
+                         AND status = 'pending'""",
+                    (notification[1], notification_id),
+                )
+            await connection.commit()
+            return True
+        except BaseException:
+            await connection.rollback()
+            raise
+
+
+async def mark_cube_notification_retry(
+    notification_id: int,
+    claim_token: str,
+    next_attempt_at: str,
+    error: str,
+) -> bool:
+    async with _economy_lock:
+        connection = _economy_connection()
+        await connection.execute("BEGIN IMMEDIATE")
+        try:
+            cur = await connection.execute(
+                """SELECT subscription_id FROM cube_notifications
+                   WHERE id = ? AND status = 'pending' AND claim_token = ?""",
+                (notification_id, claim_token),
+            )
+            row = await cur.fetchone()
+            if not row:
+                await connection.rollback()
+                return False
+            cur = await connection.execute(
+                """UPDATE cube_notifications
+                   SET attempts = attempts + 1, next_attempt_at = ?,
+                       last_error = ?, claim_token = NULL, claim_until = NULL
+                   WHERE id = ? AND status = 'pending' AND claim_token = ?""",
+                (next_attempt_at, error[:1000], notification_id, claim_token),
+            )
+            if row[0] is not None:
+                await connection.execute(
+                    """UPDATE cube_waitlist
+                       SET claim_token = NULL, claim_until = NULL
+                       WHERE id = ? AND claim_token = ?""",
+                    (row[0], claim_token),
+                )
+            await connection.commit()
+            return cur.rowcount == 1
+        except BaseException:
+            await connection.rollback()
+            raise
+
+
+async def mark_cube_notification_stale(
+    notification_id: int, claim_token: str
+) -> bool:
+    """Закрыть invite, который после claim перестал вести в открытый набор."""
+    async with _economy_lock:
+        connection = _economy_connection()
+        await connection.execute("BEGIN IMMEDIATE")
+        try:
+            cur = await connection.execute(
+                """SELECT subscription_id FROM cube_notifications
+                   WHERE id = ? AND status = 'pending' AND claim_token = ?""",
+                (notification_id, claim_token),
+            )
+            row = await cur.fetchone()
+            if not row:
+                await connection.rollback()
+                return False
+            cur = await connection.execute(
+                """UPDATE cube_notifications
+                   SET status = 'stale', claim_token = NULL, claim_until = NULL
+                   WHERE id = ? AND status = 'pending' AND claim_token = ?""",
+                (notification_id, claim_token),
+            )
+            if row[0] is not None:
+                await connection.execute(
+                    """UPDATE cube_waitlist
+                       SET claim_token = NULL, claim_until = NULL
+                       WHERE id = ? AND claim_token = ?""",
+                    (row[0], claim_token),
+                )
+            await connection.commit()
+            return cur.rowcount == 1
+        except BaseException:
+            await connection.rollback()
+            raise

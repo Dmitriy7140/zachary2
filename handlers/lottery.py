@@ -50,16 +50,42 @@ def _refresh_args(data: str | None) -> tuple[int, int] | None:
     return (round_id, owner) if round_id is not None and owner is not None else None
 
 
-def _buy_args(data: str | None) -> tuple[int, str, int] | None:
+def _buy_args(data: str | None) -> tuple[int, int, str, int] | None:
     parts = (data or "").split(":")
-    if len(parts) != 5 or parts[:2] != ["lot", "buy"]:
+    if parts[:2] != ["lot", "buy"]:
         return None
-    round_id = _positive_int(parts[2])
-    token = parts[3]
-    owner = _positive_int(parts[4])
-    if round_id is None or owner is None or _TOKEN_RE.fullmatch(token) is None:
+    # Старые уже показанные экраны содержат callback без количества и всегда
+    # означают один билет. Новые кнопки передают строго 1 или 10.
+    if len(parts) == 5:
+        round_id = _positive_int(parts[2])
+        ticket_count = 1
+        token = parts[3]
+        owner = _positive_int(parts[4])
+    elif len(parts) == 6:
+        round_id = _positive_int(parts[2])
+        ticket_count = _positive_int(parts[3])
+        token = parts[4]
+        owner = _positive_int(parts[5])
+    else:
         return None
-    return round_id, token, owner
+    if (
+        round_id is None
+        or ticket_count not in storage.LOTTERY_PURCHASE_TICKET_COUNTS
+        or owner is None
+        or _TOKEN_RE.fullmatch(token) is None
+    ):
+        return None
+    return round_id, ticket_count, token, owner
+
+
+def _buy_callback_data(
+    round_id: int, ticket_count: int, token: str, owner: int
+) -> str:
+    """Собрать короткий callback для новой покупки и не превысить лимит Telegram."""
+    callback_data = f"lot:buy:{round_id}:{ticket_count}:{token}:{owner}"
+    if len(callback_data.encode("utf-8")) > 64:
+        raise ValueError("lottery buy callback_data exceeds Telegram's 64-byte limit")
+    return callback_data
 
 
 async def _check_owner(cb: CallbackQuery, owner: int | None) -> bool:
@@ -93,16 +119,19 @@ async def _render_round(cb: CallbackQuery, owner: int) -> None:
     closed = _sales_closed(view.closes_at, now)
     rows = []
     if not closed:
-        token = token_urlsafe(8)
-        buy_data = f"lot:buy:{view.round_id}:{token}:{owner}"
-        if len(buy_data.encode("utf-8")) > 64:
-            raise ValueError("lottery buy callback_data exceeds Telegram's 64-byte limit")
-        rows.append([
-            InlineKeyboardButton(
-                text=f"🎟 Купить билет — {view.ticket_price} Z",
-                callback_data=buy_data,
-            )
-        ])
+        buy_buttons = []
+        for ticket_count in (1, 10):
+            buy_buttons.append(InlineKeyboardButton(
+                text=(
+                    f"🎟 1 билет — {view.ticket_price} Z"
+                    if ticket_count == 1
+                    else f"🎟 ×10 — {view.ticket_price * ticket_count} Z"
+                ),
+                callback_data=_buy_callback_data(
+                    view.round_id, ticket_count, token_urlsafe(8), owner
+                ),
+            ))
+        rows.append(buy_buttons)
     rows.extend([
         [InlineKeyboardButton(
             text="🔄 Обновить",
@@ -151,22 +180,24 @@ async def lottery_buy(cb: CallbackQuery):
     args = _buy_args(cb.data)
     if args is None:
         return await _check_owner(cb, None)
-    round_id, token, owner = args
+    round_id, ticket_count, token, owner = args
     if not await _check_owner(cb, owner):
         return
 
-    result = await storage.buy_lottery_ticket(
+    result = await storage.buy_lottery_tickets(
         round_id=round_id,
         tg_id=owner,
+        ticket_count=ticket_count,
         request_key=token,
         now_iso=datetime.now().isoformat(),
     )
     status = result.status
     if status == "ok":
-        ticket = f" №{result.ticket_number}" if result.ticket_number is not None else ""
-        await cb.answer(f"🎟 Билет{ticket} куплен!")
+        await cb.answer(lottery_content.purchase_success(result.ticket_numbers))
     elif status == "duplicate":
-        await cb.answer("Этот билет уже выдан. Покупка не повторилась.", show_alert=True)
+        await cb.answer(
+            lottery_content.purchase_duplicate(result.ticket_numbers), show_alert=True
+        )
     elif status == "closed":
         await cb.answer("Тираж уже закрыл кассу. Показываю актуальный.", show_alert=True)
     elif status == "insufficient":

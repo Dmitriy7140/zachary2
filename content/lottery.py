@@ -73,6 +73,25 @@ def _percent(basis_points: int) -> str:
     return f"{value:.2f}".rstrip("0").rstrip(".").replace(".", ",") + "%"
 
 
+def purchase_success(ticket_numbers: tuple[int, ...]) -> str:
+    """Короткий toast после атомарной покупки одного билета или пачки."""
+    if len(ticket_numbers) == 1:
+        return f"🎟 Билет №{ticket_numbers[0]} куплен!"
+    if ticket_numbers:
+        return (
+            f"🎟 Пачка из {len(ticket_numbers)} билетов "
+            f"№{ticket_numbers[0]}–№{ticket_numbers[-1]} куплена!"
+        )
+    return "🎟 Билеты куплены!"
+
+
+def purchase_duplicate(ticket_numbers: tuple[int, ...]) -> str:
+    """Сообщение повторному callback без повторного списания денег."""
+    if len(ticket_numbers) > 1:
+        return "Эта пачка уже выдана. Повторно ничего не списали."
+    return "Этот билет уже выдан. Покупка не повторилась."
+
+
 def winner_announcement(
     winner: str,
     prize_amount: int,
