@@ -8,7 +8,7 @@
 Сравнение «то же ли фото» — по file_unique_id (хранится в meta рядом с file_id).
 Нет файла/сети — тихо деградируем до текста. Подпись к фото ≤ 1024 символов.
 """
-from aiogram.types import FSInputFile, InputMediaPhoto, Message
+from aiogram.types import BufferedInputFile, FSInputFile, InputMediaPhoto, Message
 
 from db import storage
 
@@ -72,6 +72,45 @@ async def show_photo_menu(message: Message, path: str, meta_key: str,
         await _remember(meta_key, sent.photo)
     except Exception:
         await message.answer(caption, reply_markup=kb)
+
+
+async def show_dynamic_photo(
+    message: Message,
+    payload: bytes,
+    filename: str,
+    caption: str,
+    kb=None,
+) -> None:
+    """Показать меняющийся PNG без file_id-кэша персональных изображений."""
+    if message.photo:
+        try:
+            await message.edit_media(
+                media=InputMediaPhoto(
+                    media=BufferedInputFile(payload, filename=filename),
+                    caption=caption,
+                ),
+                reply_markup=kb,
+            )
+            return
+        except Exception as error:
+            if "not modified" in str(error):
+                return
+
+    # Telegram не умеет превратить текстовое сообщение в фото. Сначала успешно
+    # публикуем замену и только затем удаляем старый экран: сбой загрузки не
+    # должен оставить игрока вообще без сообщения и кнопок.
+    try:
+        await message.answer_photo(
+            BufferedInputFile(payload, filename=filename),
+            caption=caption,
+            reply_markup=kb,
+        )
+    except Exception:
+        await message.answer(caption, reply_markup=kb)
+    try:
+        await message.delete()
+    except Exception:
+        pass
 
 
 async def send_photo_menu(message: Message, path: str, meta_key: str,

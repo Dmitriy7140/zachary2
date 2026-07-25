@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import unittest
 from collections import deque
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, asdict
+import hashlib
+import json
 
 from content import cube as cube_content
 from game import cube
+from game import cube_catalog
 
 
 def _adjacency(spec: cube.CubeSpec, *, blocked: set[int] | None = None):
@@ -82,6 +85,68 @@ def _component_map_without(spec: cube.CubeSpec, blocked_room: int) -> dict[int, 
 
 
 class CubeGeneratorTests(unittest.TestCase):
+    def test_layout_v1_matches_golden_fingerprints(self) -> None:
+        expected = {
+            0: "fb60ab139df18e48debabe28354ee01d89674b40c8d8f25ccd1a9ba89410b6eb",
+            1: "0addd001b21a2b31c6751fc8c0ea9d0dca7d3ee207121c2f5829d6a5129eb4a5",
+            2: "561610ccfa8a38397ad0983456ccf98a8522917c9a0cb9cbd8dc0f2f807d087c",
+            42: "47918635378c279cbb7899080a24522713a3cf9ccfa5ebcaf96b6329d0a1aef5",
+            77: "4828f79e9d171c4da1d19a7992e5fef89ddd467004b43630a8db856c85e1efa5",
+        }
+        for seed, fingerprint in expected.items():
+            with self.subTest(seed=seed):
+                payload = json.dumps(
+                    asdict(cube.generate_cube(seed, layout_version=1)),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                self.assertEqual(
+                    fingerprint,
+                    hashlib.sha256(payload.encode()).hexdigest(),
+                )
+
+    def test_room_catalog_is_complete_and_versioned(self) -> None:
+        policy = cube_catalog.layout_policy(1)
+        self.assertEqual(1, policy.version)
+        self.assertLessEqual(
+            set(policy.hazard_keys),
+            set(cube_catalog.HAZARD_BY_KIND),
+        )
+        self.assertEqual(
+            set(cube_catalog.HAZARD_BY_KIND),
+            set(cube_content.HAZARD_TEXTS),
+        )
+        self.assertEqual(
+            set(cube_catalog.EFFECT_BY_KIND),
+            set(cube_content.EFFECT_TEXTS),
+        )
+        self.assertLessEqual(
+            set(cube_catalog.layout_item_keys(1)),
+            set(cube_catalog.CUBE_ITEM_BY_KEY),
+        )
+        for item_key in cube_catalog.layout_item_keys(1):
+            with self.subTest(item_key=item_key):
+                self.assertIn(item_key, cube.ITEM_CONSUMPTION)
+                self.assertLessEqual(len(item_key.encode()), 20)
+                self.assertEqual(
+                    1,
+                    cube_catalog.cube_item_use(item_key).wrong_consume_qty,
+                )
+
+    def test_every_generated_special_room_resolves_through_catalog(self) -> None:
+        for seed in range(64):
+            for room in cube.generate_cube(seed).rooms:
+                with self.subTest(seed=seed, room_id=room.room_id):
+                    if room.hazard_kind:
+                        definition = cube_catalog.hazard_definition(room.hazard_kind)
+                        self.assertIsNotNone(definition)
+                        self.assertEqual(definition.description_key, room.description_key)
+                    if room.effect_kind:
+                        definition = cube_catalog.effect_definition(room.effect_kind)
+                        self.assertIsNotNone(definition)
+                        self.assertEqual(definition.description_key, room.description_key)
+                    self.assertIn(room.description_key, cube_content.ROOM_DESCRIPTIONS)
+
     def test_same_seed_produces_same_frozen_spec(self) -> None:
         first = cube.generate_cube(20260723)
         second = cube.generate_cube(20260723)

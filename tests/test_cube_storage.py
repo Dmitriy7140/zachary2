@@ -2,6 +2,7 @@ import asyncio
 import sqlite3
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -19,14 +20,14 @@ def _spec(seed: int) -> CubeSpec:
     rooms = []
     for room_id in range(16):
         kind = "neutral"
-        description = "neutral_blue"
+        description = "neutral.blue"
         kwargs = {}
         if room_id == 0:
             kind = "start"
             description = "start"
         elif room_id == 1:
             kind = "hazard"
-            description = "hazard_mutant_leeches"
+            description = "hazard.mutant_leeches"
             kwargs = {
                 "hazard_kind": "mutant_leeches",
                 "required_item_key": "bait_1",
@@ -198,6 +199,54 @@ class CubeMigrationTests(unittest.IsolatedAsyncioTestCase):
             {"cube_generations_tax_claim_idx", "cube_notifications_due_idx"},
             {row[0] for row in await cursor.fetchall()},
         )
+        cursor = await storage._db.execute(
+            """SELECT name FROM sqlite_master
+               WHERE type = 'table' AND name = 'cube_run_visits'"""
+        )
+        self.assertEqual(("cube_run_visits",), await cursor.fetchone())
+
+    async def test_personal_visits_are_backfilled_idempotently_for_legacy_run(
+        self,
+    ) -> None:
+        await storage.init()
+        await storage._db.execute("DROP TABLE cube_run_visits")
+        cursor = await storage._db.execute(
+            """INSERT INTO cube_generations
+               (created_at, idle_expires_at, status, active_slot, seed,
+                layout_version, size, start_room_id, prize_room_id,
+                mandatory_room_id, reset_minutes, lobby_seconds, entry_cost,
+                prize_per_participant, max_participants)
+               VALUES (?, ?, 'active', NULL, 1, 1, 4, 0, 2, 1, 60, 300,
+                       500, 1000, 16)""",
+            (START.isoformat(), (START + timedelta(hours=1)).isoformat()),
+        )
+        generation_id = cursor.lastrowid
+        cursor = await storage._db.execute(
+            """INSERT INTO cube_runs
+               (generation_id, tg_id, entry_request_key, status,
+                current_room_id, previous_room_id, pending_hazard_room_id,
+                version, steps, paid_amount, dirty_amount, entered_at, updated_at)
+               VALUES (?, 1, 'legacy-map-run', 'active', 5, 4, 1,
+                       3, 3, 500, 0, ?, ?)""",
+            (generation_id, START.isoformat(), START.isoformat()),
+        )
+        run_id = cursor.lastrowid
+        await storage._db.commit()
+
+        await storage.init()
+        cursor = await storage._db.execute(
+            """SELECT room_id FROM cube_run_visits
+               WHERE run_id = ? ORDER BY room_id""",
+            (run_id,),
+        )
+        self.assertEqual([(0,), (1,), (4,), (5,)], await cursor.fetchall())
+
+        await storage.init()
+        cursor = await storage._db.execute(
+            "SELECT COUNT(*) FROM cube_run_visits WHERE run_id = ?",
+            (run_id,),
+        )
+        self.assertEqual((4,), await cursor.fetchone())
 
 
 class CubeStorageTests(unittest.IsolatedAsyncioTestCase):
@@ -227,6 +276,249 @@ class CubeStorageTests(unittest.IsolatedAsyncioTestCase):
             await storage.add_zbucks(tg_id, balance)
         if dirty:
             await storage.add_dirty(tg_id, dirty)
+
+    async def test_roommates_follow_current_room_not_visit_history(self) -> None:
+        for tg_id in (1, 2):
+            await self._profile(tg_id, balance=500)
+        await storage.enter_cube(
+            self.generation, 1, "roommate-entry-1", _spec(2), clock=lambda: START
+        )
+        second = await storage.enter_cube(
+            self.generation,
+            2,
+            "roommate-entry-2",
+            _spec(2),
+            clock=lambda: START + timedelta(seconds=1),
+        )
+
+        together = await storage.get_cube_view(1)
+        self.assertEqual([(2, "Nick2")], [
+            (player.tg_id, player.nick) for player in together.roommates
+        ])
+
+        collision = await storage.move_cube(
+            self.generation,
+            2,
+            second.version,
+            "e",
+            _spec(2),
+            clock=lambda: START + timedelta(seconds=2),
+        )
+        # Столкновение записывает ловушку в visits, но фактическая позиция
+        # остаётся стартовой — игрок всё ещё доступен для будущего взаимодействия.
+        still_together = await storage.get_cube_view(1)
+        self.assertEqual([2], [player.tg_id for player in still_together.roommates])
+
+        await storage.add_item(2, "bait_1", 1)
+        moved = await storage.resolve_cube_hazard_and_enter(
+            self.generation,
+            2,
+            collision.version,
+            "bait_1",
+            _spec(2),
+            clock=lambda: START + timedelta(seconds=3),
+        )
+        self.assertEqual("resolved_and_moved", moved.status)
+        self.assertEqual([], list((await storage.get_cube_view(1)).roommates))
+        self.assertEqual([], list((await storage.get_cube_view(2)).roommates))
+
+    async def test_unknown_room_behavior_rolls_back_generation_rebuild(self) -> None:
+        candidate = _spec(2)
+        rooms = tuple(
+            replace(
+                room,
+                description_key="anomaly.mystery",
+                effect_kind="mystery",
+            )
+            if room.room_id == 5
+            else room
+            for room in candidate.rooms
+        )
+        invalid = replace(candidate, rooms=rooms)
+
+        with self.assertRaisesRegex(ValueError, "unknown Cube effect"):
+            await storage.advance_cube_lifecycle(
+                invalid,
+                clock=lambda: START + timedelta(hours=2),
+            )
+
+        self.assertEqual(
+            self.generation,
+            await storage.get_current_cube_generation_id(),
+        )
+
+    async def test_invalid_effect_targets_roll_back_generation_rebuild(self) -> None:
+        candidate = _spec(2)
+        cases = (
+            (
+                "forbidden target room",
+                12,
+                {"effect_target_room_id": 2, "effect_arg": "402"},
+                "forbidden target",
+            ),
+            (
+                "fake archive direction",
+                8,
+                {"effect_target_room_id": 2, "effect_arg": "n"},
+                "not behind a passage",
+            ),
+        )
+        for label, room_id, changes, error in cases:
+            with self.subTest(label):
+                rooms = tuple(
+                    replace(room, **changes) if room.room_id == room_id else room
+                    for room in candidate.rooms
+                )
+                invalid = replace(candidate, rooms=rooms)
+                with self.assertRaisesRegex(ValueError, error):
+                    await storage.advance_cube_lifecycle(
+                        invalid,
+                        clock=lambda: START + timedelta(hours=2),
+                    )
+                self.assertEqual(
+                    self.generation,
+                    await storage.get_current_cube_generation_id(),
+                )
+
+    async def test_non_adjacent_passage_rolls_back_generation_rebuild(self) -> None:
+        candidate = _spec(2)
+        invalid = replace(
+            candidate,
+            passages=(*candidate.passages, PassageSpec(0, 15)),
+        )
+
+        with self.assertRaisesRegex(ValueError, "non-adjacent rooms"):
+            await storage.advance_cube_lifecycle(
+                invalid,
+                clock=lambda: START + timedelta(hours=2),
+            )
+
+        self.assertEqual(
+            self.generation,
+            await storage.get_current_cube_generation_id(),
+        )
+        view = await storage.get_cube_view(999)
+        self.assertEqual("waiting", view.generation_status)
+
+    async def test_personal_map_tracks_real_exits_without_shared_reveals(self) -> None:
+        for tg_id in (1, 2):
+            await self._profile(tg_id, balance=500)
+        first = await storage.enter_cube(
+            self.generation, 1, "map-entry-one", _spec(2), clock=lambda: START
+        )
+        await storage.enter_cube(
+            self.generation,
+            2,
+            "map-entry-two",
+            _spec(2),
+            clock=lambda: START + timedelta(seconds=1),
+        )
+
+        initial = await storage.get_cube_view(1)
+        self.assertEqual(4, initial.map_size)
+        self.assertEqual(1, initial.explored_count)
+        self.assertEqual([0], [room.room_id for room in initial.map_rooms])
+        self.assertEqual(frozenset({"e", "s"}), initial.map_rooms[0].exits)
+
+        observed = await storage.observe_cube(
+            self.generation,
+            1,
+            first.version,
+            "e",
+            _spec(2),
+            clock=lambda: START + timedelta(seconds=2),
+        )
+        self.assertEqual("observed", observed.status)
+        after_observe = await storage.get_cube_view(1)
+        self.assertEqual([0], [room.room_id for room in after_observe.map_rooms])
+
+        collision = await storage.move_cube(
+            self.generation,
+            1,
+            first.version,
+            "e",
+            _spec(2),
+            clock=lambda: START + timedelta(seconds=3),
+        )
+        self.assertEqual("hazard", collision.status)
+        after_collision = await storage.get_cube_view(1)
+        self.assertEqual(0, after_collision.current_room_id)
+        self.assertEqual({0, 1}, {room.room_id for room in after_collision.map_rooms})
+        hazard = next(room for room in after_collision.map_rooms if room.room_id == 1)
+        self.assertEqual("hazard", hazard.kind)
+        self.assertEqual(frozenset({"e", "s", "w"}), hazard.exits)
+
+        other_player = await storage.get_cube_view(2)
+        self.assertEqual([0], [room.room_id for room in other_player.map_rooms])
+
+        await storage.add_item(1, "bait_1", 1)
+        entered_hazard = await storage.resolve_cube_hazard_and_enter(
+            self.generation,
+            1,
+            collision.version,
+            "bait_1",
+            _spec(2),
+            clock=lambda: START + timedelta(seconds=4),
+        )
+        bounced = await storage.move_cube(
+            self.generation,
+            1,
+            entered_hazard.version,
+            "s",
+            _spec(2),
+            clock=lambda: START + timedelta(seconds=5),
+        )
+        self.assertEqual("bounced", bounced.status)
+        after_echo = await storage.get_cube_view(1)
+        self.assertEqual(1, after_echo.current_room_id)
+        self.assertEqual({0, 1, 5}, {room.room_id for room in after_echo.map_rooms})
+
+    async def test_personal_map_records_transfer_and_survives_restart(self) -> None:
+        await self._profile(1, balance=500)
+        entered = await storage.enter_cube(
+            self.generation, 1, "map-persist", _spec(2), clock=lambda: START
+        )
+        dark = await storage.move_cube(
+            self.generation,
+            1,
+            entered.version,
+            "s",
+            _spec(2),
+            clock=lambda: START + timedelta(seconds=1),
+        )
+        archive = await storage.move_cube(
+            self.generation,
+            1,
+            dark.version,
+            "s",
+            _spec(2),
+            clock=lambda: START + timedelta(seconds=2),
+        )
+        after_archive = await storage.get_cube_view(1)
+        self.assertEqual({0, 4, 8}, {room.room_id for room in after_archive.map_rooms})
+        transfer = await storage.move_cube(
+            self.generation,
+            1,
+            archive.version,
+            "e",
+            _spec(2),
+            clock=lambda: START + timedelta(seconds=3),
+        )
+        self.assertEqual("tunnel", transfer.effect_kind)
+        self.assertEqual(10, transfer.final_room_id)
+
+        before_restart = await storage.get_cube_view(1)
+        expected = {0, 4, 8, 9, 10}
+        self.assertEqual(expected, {room.room_id for room in before_restart.map_rooms})
+        self.assertEqual(len(expected), before_restart.explored_count)
+        self.assertEqual(10, before_restart.current_room_id)
+
+        await storage.close()
+        storage._economy_lock = asyncio.Lock()
+        await storage.init()
+        after_restart = await storage.get_cube_view(1)
+        self.assertEqual(expected, {room.room_id for room in after_restart.map_rooms})
+        self.assertEqual(10, after_restart.current_room_id)
 
     async def test_entry_hazard_win_and_immediate_rebuild_are_atomic(self) -> None:
         await self._profile(1, balance=1000, dirty=700)
@@ -270,19 +562,23 @@ class CubeStorageTests(unittest.IsolatedAsyncioTestCase):
             self.generation,
             1,
             collision.version,
-            1,
+            "bait_1",
             _spec(4),
             clock=lambda: START + timedelta(seconds=4),
         )
         self.assertEqual("missing_item", missing.status)
         self.assertEqual(2, missing.version)
+        self.assertIsNone(missing.required_item_key)
+        self.assertEqual("bait_1", missing.selected_item_key)
+        pending = await storage.get_cube_view(1)
+        self.assertEqual(1, pending.pending_hazard_room_id)
 
         await storage.add_item(1, "bait_1", 1)
         opened = await storage.resolve_cube_hazard_and_enter(
             self.generation,
             1,
             missing.version,
-            1,
+            "bait_1",
             _spec(4),
             clock=lambda: START + timedelta(seconds=5),
         )
@@ -370,6 +666,25 @@ class CubeStorageTests(unittest.IsolatedAsyncioTestCase):
         public = [job for job in notifications if job.kind == "winner_public"]
         self.assertEqual(1, len(public))
         self.assertEqual("Nick1", public[0].winner_nick)
+        bot = AsyncMock()
+        self.assertTrue(
+            await cube_game._send_notification(
+                bot,
+                public[0],
+                now=START + timedelta(seconds=8),
+            )
+        )
+        bot.send_message.assert_awaited_once()
+        public_message = bot.send_message.await_args
+        self.assertEqual((), public_message.args)
+        self.assertEqual(config.channel_id, public_message.kwargs["chat_id"])
+        self.assertEqual(
+            config.thread_id or None,
+            public_message.kwargs["message_thread_id"],
+        )
+        self.assertIn("tg://user?id=1", public_message.kwargs["text"])
+        self.assertIn("<b>1 000 Z</b>", public_message.kwargs["text"])
+        self.assertIn("👥 Участников: <b>1</b>", public_message.kwargs["text"])
         self.assertTrue(
             await storage.mark_cube_notification_sent(
                 public[0].notification_id,
@@ -377,6 +692,171 @@ class CubeStorageTests(unittest.IsolatedAsyncioTestCase):
                 (START + timedelta(seconds=8)).isoformat(),
             )
         )
+
+    async def test_wrong_items_are_lost_and_retreat_is_safe(
+        self,
+    ) -> None:
+        await self._profile(1, balance=500)
+        await storage.add_item(1, "bucket", 1)
+        entered = await storage.enter_cube(
+            self.generation, 1, "wrong-item-entry", _spec(2), clock=lambda: START
+        )
+        collision = await storage.move_cube(
+            self.generation,
+            1,
+            entered.version,
+            "e",
+            _spec(2),
+            clock=lambda: START + timedelta(seconds=1),
+        )
+
+        await storage.add_item(1, "iphone", 1)
+        with self.assertRaisesRegex(ValueError, "Cube hazard item"):
+            await storage.resolve_cube_hazard_and_enter(
+                self.generation,
+                1,
+                collision.version,
+                "iphone",
+                _spec(2),
+                clock=lambda: START + timedelta(seconds=2),
+            )
+        self.assertEqual(1, await storage.get_item_qty(1, "iphone"))
+
+        wrong = await storage.resolve_cube_hazard_and_enter(
+            self.generation,
+            1,
+            collision.version,
+            "bucket",
+            _spec(2),
+            clock=lambda: START + timedelta(seconds=2),
+        )
+        self.assertEqual("wrong_item", wrong.status)
+        self.assertEqual("bucket", wrong.selected_item_key)
+        self.assertEqual(1, wrong.consume_qty)
+        self.assertIsNone(wrong.required_item_key)
+        self.assertEqual(0, await storage.get_item_qty(1, "bucket"))
+        after_wrong = await storage.get_cube_view(1)
+        self.assertEqual(0, after_wrong.current_room_id)
+        self.assertIsNone(after_wrong.pending_hazard_room_id)
+
+        stale = await storage.resolve_cube_hazard_and_enter(
+            self.generation,
+            1,
+            collision.version,
+            "bucket",
+            _spec(2),
+            clock=lambda: START + timedelta(seconds=3),
+        )
+        self.assertEqual("stale", stale.status)
+        self.assertEqual(0, await storage.get_item_qty(1, "bucket"))
+
+        await storage.add_item(1, "bait_3", 2)
+        second_collision = await storage.move_cube(
+            self.generation,
+            1,
+            wrong.version,
+            "e",
+            _spec(2),
+            clock=lambda: START + timedelta(seconds=4),
+        )
+        wrong_consumable = await storage.resolve_cube_hazard_and_enter(
+            self.generation,
+            1,
+            second_collision.version,
+            "bait_3",
+            _spec(2),
+            clock=lambda: START + timedelta(seconds=5),
+        )
+        self.assertEqual("wrong_item", wrong_consumable.status)
+        self.assertEqual(1, await storage.get_item_qty(1, "bait_3"))
+
+        third_collision = await storage.move_cube(
+            self.generation,
+            1,
+            wrong_consumable.version,
+            "e",
+            _spec(2),
+            clock=lambda: START + timedelta(seconds=6),
+        )
+        retreated = await storage.retreat_cube_hazard(
+            self.generation,
+            1,
+            third_collision.version,
+            _spec(2),
+            clock=lambda: START + timedelta(seconds=7),
+        )
+        self.assertEqual("retreated", retreated.status)
+        after_retreat = await storage.get_cube_view(1)
+        self.assertEqual(0, after_retreat.current_room_id)
+        self.assertIsNone(after_retreat.pending_hazard_room_id)
+
+        fourth_collision = await storage.move_cube(
+            self.generation,
+            1,
+            retreated.version,
+            "e",
+            _spec(2),
+            clock=lambda: START + timedelta(seconds=8),
+        )
+        await storage.add_item(1, "bait_1", 1)
+        opened = await storage.resolve_cube_hazard_and_enter(
+            self.generation,
+            1,
+            fourth_collision.version,
+            "bait_1",
+            _spec(2),
+            clock=lambda: START + timedelta(seconds=9),
+        )
+        self.assertEqual("resolved_and_moved", opened.status)
+        self.assertEqual(1, opened.final_room_id)
+        self.assertEqual(0, await storage.get_item_qty(1, "bait_1"))
+
+    async def test_two_players_resolving_one_hazard_spend_only_one_item(
+        self,
+    ) -> None:
+        collisions = []
+        for tg_id in (1, 2):
+            await self._profile(tg_id, balance=500)
+            await storage.add_item(tg_id, "bait_1", 1)
+            entered = await storage.enter_cube(
+                self.generation,
+                tg_id,
+                f"hazard-race-entry-{tg_id}",
+                _spec(2),
+                clock=lambda: START,
+            )
+            collisions.append(await storage.move_cube(
+                self.generation,
+                tg_id,
+                entered.version,
+                "e",
+                _spec(2),
+                clock=lambda: START + timedelta(seconds=1),
+            ))
+
+        results = await asyncio.gather(*(
+            storage.resolve_cube_hazard_and_enter(
+                self.generation,
+                tg_id,
+                collision.version,
+                "bait_1",
+                _spec(2),
+                clock=lambda: START + timedelta(seconds=2),
+            )
+            for tg_id, collision in zip((1, 2), collisions)
+        ))
+
+        self.assertCountEqual(
+            ["resolved_and_moved", "already_resolved"],
+            [result.status for result in results],
+        )
+        quantities = [
+            await storage.get_item_qty(tg_id, "bait_1") for tg_id in (1, 2)
+        ]
+        self.assertCountEqual([0, 1], quantities)
+        views = [await storage.get_cube_view(tg_id) for tg_id in (1, 2)]
+        self.assertCountEqual([0, 1], [view.current_room_id for view in views])
+        self.assertTrue(all(view.pending_hazard_room_id is None for view in views))
 
     async def test_two_simultaneous_winners_create_one_payout_and_generation(self) -> None:
         for tg_id in (1, 2):
@@ -412,7 +892,7 @@ class CubeStorageTests(unittest.IsolatedAsyncioTestCase):
             self.generation,
             1,
             first_collision.version,
-            1,
+            "bait_1",
             _spec(3),
             clock=lambda: START + timedelta(seconds=3),
         )
@@ -509,7 +989,7 @@ class CubeStorageTests(unittest.IsolatedAsyncioTestCase):
             self.generation,
             1,
             collision.version,
-            1,
+            "bait_1",
             _spec(2),
             clock=lambda: START + timedelta(seconds=3),
         )

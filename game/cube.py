@@ -11,7 +11,35 @@ from datetime import datetime, timedelta
 from enum import Enum
 from typing import Callable, Iterable, TYPE_CHECKING
 
-from game.items import ITEMS
+from game.cube_catalog import (
+    CURRENT_LAYOUT_VERSION,
+    EFFECT_ARCHIVE,
+    EFFECT_DARK,
+    EFFECT_ECHO,
+    EFFECT_TUNNEL,
+    EFFECT_VECTOR,
+    HAZARD_BY_KIND,
+    HAZARD_SPECS,
+    ITEM_CONSUMPTION,
+    MAP_CATEGORY_DANGEROUS,
+    MAP_CATEGORY_NEUTRAL,
+    MAP_CATEGORY_USEFUL,
+    ROOM_ANOMALY,
+    ROOM_HAZARD,
+    ROOM_NEUTRAL,
+    ROOM_PRIZE,
+    ROOM_START,
+    TRANSFER_EFFECTS,
+    EffectArgKind,
+    EffectBehavior,
+    EffectPlacement,
+    HazardSpec,
+    LayoutPolicy,
+    effect_definition,
+    effect_has_behavior,
+    layout_policy,
+    room_map_category,
+)
 
 if TYPE_CHECKING:
     from aiogram import Bot
@@ -21,7 +49,7 @@ log = logging.getLogger(__name__)
 
 GRID_SIZE = 4
 ROOM_COUNT = GRID_SIZE * GRID_SIZE
-LAYOUT_VERSION = 1
+LAYOUT_VERSION = CURRENT_LAYOUT_VERSION
 SCHEDULER_INTERVAL_SECONDS = 30
 NOTIFICATION_RETRY_BASE_SECONDS = 30
 NOTIFICATION_RETRY_MAX_SECONDS = 60 * 60
@@ -30,20 +58,6 @@ WORK_CLAIM_LEASE_SECONDS = 5 * 60
 
 PRIVATE_NOTIFICATION = "lobby_private"
 PUBLIC_NOTIFICATION = "winner_public"
-
-ROOM_START = "start"
-ROOM_PRIZE = "prize"
-ROOM_NEUTRAL = "neutral"
-ROOM_HAZARD = "hazard"
-ROOM_ANOMALY = "anomaly"
-
-EFFECT_ARCHIVE = "archive"
-EFFECT_ECHO = "echo"
-EFFECT_DARK = "dark"
-EFFECT_VECTOR = "vector"
-EFFECT_TUNNEL = "tunnel"
-TRANSFER_EFFECTS = frozenset({EFFECT_VECTOR, EFFECT_TUNNEL})
-
 
 class Direction(str, Enum):
     NORTH = "n"
@@ -70,50 +84,6 @@ _OPPOSITE_DIRECTIONS = {
     Direction.SOUTH: Direction.NORTH,
     Direction.WEST: Direction.EAST,
 }
-
-
-@dataclass(frozen=True)
-class HazardSpec:
-    kind: str
-    item_key: str
-    consume_qty: int
-
-
-HAZARD_SPECS = (
-    HazardSpec("flooded_floor", "bucket", 0),
-    HazardSpec("chasm_lever", "rod", 0),
-    HazardSpec("mutant_leeches", "bait_1", 1),
-    HazardSpec("wire_net", "znak", 0),
-    HazardSpec("locked_hatch", "lockpicks", 0),
-    HazardSpec("shark_guard", "bait_3", 1),
-    HazardSpec("laser_grid", "milk_can", 1),
-    HazardSpec("invisible_cutters", "egg", 1),
-)
-HAZARD_BY_KIND = {hazard.kind: hazard for hazard in HAZARD_SPECS}
-ITEM_CONSUMPTION = {hazard.item_key: hazard.consume_qty for hazard in HAZARD_SPECS}
-
-
-def _validate_hazard_registry() -> None:
-    expected = {
-        "bucket": 0,
-        "rod": 0,
-        "znak": 0,
-        "lockpicks": 0,
-        "bait_1": 1,
-        "bait_3": 1,
-        "milk_can": 1,
-        "egg": 1,
-    }
-    if ITEM_CONSUMPTION != expected:
-        raise RuntimeError("Cube item whitelist no longer matches its v1 contract")
-    missing = set(expected) - set(ITEMS)
-    if missing:
-        raise RuntimeError(f"Cube references unknown ITEMS keys: {sorted(missing)}")
-    if len(HAZARD_BY_KIND) != len(HAZARD_SPECS):
-        raise RuntimeError("Cube hazard kinds must be unique")
-
-
-_validate_hazard_registry()
 
 
 @dataclass(frozen=True)
@@ -184,6 +154,13 @@ class CubeSpec:
 
 
 @dataclass(frozen=True)
+class PlacedEffect:
+    kind: str
+    target_room_id: int | None = None
+    arg: str | None = None
+
+
+@dataclass(frozen=True)
 class _GeneratedLayout:
     start: int
     prize: int
@@ -193,7 +170,7 @@ class _GeneratedLayout:
     tree_path: tuple[int, ...]
     components_without_mandatory: tuple[frozenset[int], ...]
     hazards: dict[int, HazardSpec]
-    effects: dict[int, tuple[str, int | None, str | None]]
+    effects: dict[int, PlacedEffect]
 
 
 def opposite_direction(direction: Direction | str) -> Direction:
@@ -233,14 +210,13 @@ def generate_cube(seed: int, *, layout_version: int = LAYOUT_VERSION) -> CubeSpe
     Внутренние попытки тоже детерминированы. Seed описывает всё поколение,
     поэтому вызывающий код обязан сохранить итоговые комнаты и двери в БД.
     """
-    if layout_version != LAYOUT_VERSION:
-        raise ValueError(f"unsupported Cube layout version: {layout_version}")
+    policy = layout_policy(layout_version)
 
     source = random.Random(seed)
     layout: _GeneratedLayout | None = None
     for _ in range(2048):
         attempt = random.Random(source.getrandbits(128))
-        layout = _try_generate_layout(attempt)
+        layout = _try_generate_layout(attempt, policy)
         if layout is not None:
             break
     if layout is None:
@@ -248,16 +224,7 @@ def generate_cube(seed: int, *, layout_version: int = LAYOUT_VERSION) -> CubeSpe
 
     rng = random.Random(source.getrandbits(128))
     codes = rng.sample(range(100, 1000), ROOM_COUNT)
-    neutral_keys = [
-        "neutral.white",
-        "neutral.amber",
-        "neutral.blue",
-        "neutral.green",
-        "neutral.red",
-        "neutral.violet",
-        "neutral.rust",
-        "neutral.mirror",
-    ]
+    neutral_keys = list(policy.neutral_description_keys)
     rng.shuffle(neutral_keys)
 
     rooms: list[RoomSpec] = []
@@ -273,10 +240,13 @@ def generate_cube(seed: int, *, layout_version: int = LAYOUT_VERSION) -> CubeSpe
             description_key = "prize"
         elif hazard is not None:
             kind = ROOM_HAZARD
-            description_key = f"hazard.{hazard.kind}"
+            description_key = hazard.description_key
         elif effect is not None:
             kind = ROOM_ANOMALY
-            description_key = f"anomaly.{effect[0]}"
+            definition = effect_definition(effect.kind)
+            if definition is None:
+                raise RuntimeError(f"layout produced unknown effect: {effect.kind}")
+            description_key = definition.description_key
         else:
             kind = ROOM_NEUTRAL
             description_key = neutral_keys[room_id % len(neutral_keys)]
@@ -293,14 +263,15 @@ def generate_cube(seed: int, *, layout_version: int = LAYOUT_VERSION) -> CubeSpe
                 required_item_key=hazard.item_key if hazard else None,
                 consume_qty=hazard.consume_qty if hazard else 0,
                 is_required=room_id == layout.mandatory,
-                effect_kind=effect[0] if effect else None,
-                effect_target_room_id=effect[1] if effect else None,
+                effect_kind=effect.kind if effect else None,
+                effect_target_room_id=effect.target_room_id if effect else None,
                 effect_arg=(
-                    str(codes[effect[1]])
+                    str(codes[effect.target_room_id])
                     if effect is not None
-                    and effect[0] in TRANSFER_EFFECTS
-                    and effect[1] is not None
-                    else effect[2] if effect else None
+                    and effect_definition(effect.kind).arg_kind
+                    is EffectArgKind.TARGET_ROOM_CODE
+                    and effect.target_room_id is not None
+                    else effect.arg if effect else None
                 ),
             )
         )
@@ -332,7 +303,9 @@ def new_cube_spec(
     return generate_cube(randbits(63))
 
 
-def _try_generate_layout(rng: random.Random) -> _GeneratedLayout | None:
+def _try_generate_layout(
+    rng: random.Random, policy: LayoutPolicy,
+) -> _GeneratedLayout | None:
     grid_edges = _all_grid_edges()
     shuffled_edges = list(grid_edges)
     rng.shuffle(shuffled_edges)
@@ -385,7 +358,8 @@ def _try_generate_layout(rng: random.Random) -> _GeneratedLayout | None:
     optional_candidates = sorted(set(range(ROOM_COUNT)) - set(path))
     optional_count = rng.randint(0, min(2, len(optional_candidates)))
     optional_rooms = rng.sample(optional_candidates, optional_count)
-    selected_hazards = rng.sample(HAZARD_SPECS, 1 + optional_count)
+    hazard_pool = tuple(HAZARD_BY_KIND[key] for key in policy.hazard_keys)
+    selected_hazards = rng.sample(hazard_pool, 1 + optional_count)
     hazards = {mandatory: selected_hazards[0]}
     hazards.update(zip(optional_rooms, selected_hazards[1:]))
 
@@ -396,6 +370,7 @@ def _try_generate_layout(rng: random.Random) -> _GeneratedLayout | None:
         start,
         prize,
         set(hazards),
+        policy.effect_keys,
     )
     if effects is None:
         return None
@@ -428,9 +403,41 @@ def _assign_effects(
     start: int,
     prize: int,
     hazards: set[int],
-) -> dict[int, tuple[str, int | None, str | None]] | None:
+    effect_keys: tuple[str, ...],
+) -> dict[int, PlacedEffect] | None:
+    definitions = []
+    for key in effect_keys:
+        definition = effect_definition(key)
+        if definition is None:
+            return None
+        definitions.append(definition)
+
+    paired = [
+        definition
+        for definition in definitions
+        if definition.placement is EffectPlacement.PAIRED_SAME_COMPONENT
+    ]
+    transfers = [
+        definition
+        for definition in definitions
+        if definition.placement is EffectPlacement.SAME_COMPONENT_TRANSFER
+    ]
+    neighbor_hints = [
+        definition
+        for definition in definitions
+        if definition.placement is EffectPlacement.NEIGHBOR_TARGET
+    ]
+    singles = [
+        definition
+        for definition in definitions
+        if definition.placement is EffectPlacement.SINGLE
+    ]
+
     eligible = set(range(ROOM_COUNT)) - hazards - {start, prize}
-    if len(eligible) < 6:
+    required_sources = (
+        len(paired) * 2 + len(transfers) + len(neighbor_hints) + len(singles)
+    )
+    if len(eligible) < required_sources:
         return None
     component_index = {
         room_id: index
@@ -438,68 +445,73 @@ def _assign_effects(
         for room_id in component
     }
 
-    pair_components = [
-        sorted(eligible & component)
-        for component in components
-        if len(eligible & component) >= 2
-    ]
-    if not pair_components:
-        return None
-    tunnel_pool = rng.choice(pair_components)
-    tunnel_a, tunnel_b = rng.sample(tunnel_pool, 2)
-    effects: dict[int, tuple[str, int | None, str | None]] = {
-        tunnel_a: (EFFECT_TUNNEL, tunnel_b, None),
-        tunnel_b: (EFFECT_TUNNEL, tunnel_a, None),
-    }
+    effects: dict[int, PlacedEffect] = {}
+    remaining = set(eligible)
 
-    remaining = eligible - {tunnel_a, tunnel_b}
-    vector_sources = [
-        room_id
-        for room_id in remaining
-        if any(
-            target != room_id
-            and target not in hazards
-            and target != prize
-            and component_index.get(target) == component_index.get(room_id)
+    for definition in paired:
+        pair_components = [
+            sorted(remaining & component)
+            for component in components
+            if len(remaining & component) >= 2
+        ]
+        if not pair_components:
+            return None
+        pool = rng.choice(pair_components)
+        room_a, room_b = rng.sample(pool, 2)
+        effects[room_a] = PlacedEffect(definition.key, room_b)
+        effects[room_b] = PlacedEffect(definition.key, room_a)
+        remaining.difference_update({room_a, room_b})
+
+    for definition in transfers:
+        sources = [
+            room_id
+            for room_id in remaining
+            if any(
+                target != room_id
+                and target not in hazards
+                and target != prize
+                and component_index.get(target) == component_index.get(room_id)
+                for target in range(ROOM_COUNT)
+            )
+        ]
+        if not sources:
+            return None
+        source = rng.choice(sources)
+        targets = [
+            target
             for target in range(ROOM_COUNT)
-        )
-    ]
-    if not vector_sources:
-        return None
-    vector_source = rng.choice(vector_sources)
-    vector_targets = [
-        target
-        for target in range(ROOM_COUNT)
-        if target != vector_source
-        and target not in hazards
-        and target not in {prize, start}
-        and component_index.get(target) == component_index.get(vector_source)
-    ]
-    if not vector_targets:
-        return None
-    vector_target = rng.choice(vector_targets)
-    effects[vector_source] = (EFFECT_VECTOR, vector_target, str(vector_target))
+            if target != source
+            and target not in hazards
+            and target not in {prize, start}
+            and component_index.get(target) == component_index.get(source)
+        ]
+        if not targets:
+            return None
+        target = rng.choice(targets)
+        effects[source] = PlacedEffect(definition.key, target, str(target))
+        remaining.remove(source)
 
-    remaining.remove(vector_source)
-    if len(remaining) < 3:
+    passive_definitions = neighbor_hints + singles
+    if len(remaining) < len(passive_definitions):
         return None
-    archive, echo, dark = rng.sample(sorted(remaining), 3)
-    archive_neighbors = sorted(_adjacency(passages)[archive])
-    archive_target = rng.choice(archive_neighbors) if archive_neighbors else None
-    archive_direction = (
-        direction_between(archive, archive_target).value
-        if archive_target is not None
-        else None
-    )
-    effects[archive] = (EFFECT_ARCHIVE, archive_target, archive_direction)
-    effects[echo] = (EFFECT_ECHO, None, None)
-    effects[dark] = (EFFECT_DARK, None, None)
+    passive_rooms = rng.sample(sorted(remaining), len(passive_definitions))
+    adjacency = _adjacency(passages)
+    for definition, room_id in zip(passive_definitions, passive_rooms):
+        if definition.placement is EffectPlacement.NEIGHBOR_TARGET:
+            neighbors = sorted(adjacency[room_id])
+            target = rng.choice(neighbors) if neighbors else None
+            direction = (
+                direction_between(room_id, target).value if target is not None else None
+            )
+            effects[room_id] = PlacedEffect(definition.key, target, direction)
+        else:
+            effects[room_id] = PlacedEffect(definition.key)
     return effects
 
 
 def _prize_reachable(
     passages: set[tuple[int, int]],
-    effects: dict[int, tuple[str, int | None, str | None]],
+    effects: dict[int, PlacedEffect],
     start: int,
     prize: int,
     *,
@@ -515,8 +527,13 @@ def _prize_reachable(
                 continue
             if entered == prize:
                 return True
-            effect_kind, target, _ = effects.get(entered, (None, None, None))
-            final = target if effect_kind in TRANSFER_EFFECTS else entered
+            effect = effects.get(entered)
+            final = (
+                effect.target_room_id
+                if effect is not None
+                and effect_has_behavior(effect.kind, EffectBehavior.TRANSFER)
+                else entered
+            )
             if final is None or final in blocked or final in seen:
                 continue
             seen.add(final)
@@ -537,15 +554,27 @@ def _validate_cube(spec: CubeSpec) -> None:
     if required[0].kind != ROOM_HAZARD:
         raise AssertionError("mandatory room must be a hazard")
     for room in spec.rooms:
-        if room.hazard_kind is None:
-            continue
-        hazard = HAZARD_BY_KIND.get(room.hazard_kind)
-        if hazard is None:
-            raise AssertionError("unknown Cube hazard")
-        if room.required_item_key != hazard.item_key:
-            raise AssertionError("hazard item mismatch")
-        if room.consume_qty != hazard.consume_qty:
-            raise AssertionError("hazard consumption mismatch")
+        if room.hazard_kind is not None:
+            hazard = HAZARD_BY_KIND.get(room.hazard_kind)
+            if hazard is None:
+                raise AssertionError("unknown Cube hazard")
+            if room.kind != ROOM_HAZARD or room.description_key != hazard.description_key:
+                raise AssertionError("hazard room definition mismatch")
+            if room.required_item_key != hazard.item_key:
+                raise AssertionError("hazard item mismatch")
+            if room.consume_qty != hazard.consume_qty:
+                raise AssertionError("hazard consumption mismatch")
+        if room.effect_kind is not None:
+            effect = effect_definition(room.effect_kind)
+            if effect is None:
+                raise AssertionError("unknown Cube effect")
+            if room.kind != ROOM_ANOMALY or room.description_key != effect.description_key:
+                raise AssertionError("effect room definition mismatch")
+            if (
+                effect.arg_kind is EffectArgKind.TARGET_ROOM_CODE
+                and room.effect_target_room_id is None
+            ):
+                raise AssertionError("transfer effect has no target")
     if _shortest_distance(_passage_edges(spec.passages), spec.start_room_id, spec.prize_room_id) < 6:
         raise AssertionError("start and prize are too close")
 

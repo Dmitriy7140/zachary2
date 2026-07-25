@@ -1,8 +1,9 @@
 """Telegram-интерфейс общей мини-игры «Куб».
 
-Callback хранит только поколение, версию хода и направление/цель. Любое
+Callback хранит только поколение, версию хода и направление/выбранный предмет. Любое
 авторитетное состояние повторно читается и проверяется в storage.
 """
+import asyncio
 import html
 import logging
 import re
@@ -17,9 +18,16 @@ from config import config
 from content import cube as cube_content
 from db import storage
 from game.cube import new_cube_spec
+from game.cube_catalog import (
+    CUBE_ITEM_USES,
+    cube_item_use,
+    layout_item_keys,
+    room_map_category,
+)
 from game.items import ITEMS
+from scripts.cube_map_renderer import KnownRoom, MapSnapshot, render_map_png
 from utils.guards import ensure_private, with_owner
-from utils.photo import show_screen
+from utils.photo import show_dynamic_photo, show_photo_menu, show_screen
 
 log = logging.getLogger(__name__)
 router = Router()
@@ -28,6 +36,12 @@ _POSITIVE_INT_RE = re.compile(r"[1-9][0-9]*")
 _NONNEGATIVE_INT_RE = re.compile(r"(?:0|[1-9][0-9]*)")
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{11}")
 _DIRECTIONS = ("n", "e", "s", "w")
+_HAZARD_ITEM_KEYS = tuple(definition.item_key for definition in CUBE_ITEM_USES)
+_SCREEN_ROOM = "room"
+_SCREEN_OBSERVE = "observe"
+_SCREEN_HAZARD_ITEMS = "hazard.choose_item"
+_GAMES_PHOTO = "static/games.png"
+_GAMES_PHOTO_META = "games_photo_id_v2"
 _DIRECTION_LABELS = {
     "n": "⬆️ Вперёд",
     "e": "➡️ Вправо",
@@ -49,6 +63,26 @@ _CATEGORY_LABELS = {
 
 def _kb(rows) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _map_snapshot(view: storage.CubeView) -> MapSnapshot:
+    """Адаптировать безопасный личный storage-снимок к чистому рендереру."""
+    if view.current_room_id is None:
+        raise ValueError("active Cube view has no current room")
+    return MapSnapshot(
+        size=view.map_size,
+        rooms=tuple(
+            KnownRoom(
+                room_id=room.room_id,
+                row=room.row,
+                column=room.column,
+                exits=room.exits,
+                category=room_map_category(room.kind, room.effect_kind),
+            )
+            for room in view.map_rooms
+        ),
+        current_room_id=view.current_room_id,
+    )
 
 
 def _positive_int(value: str) -> int | None:
@@ -111,16 +145,31 @@ def _look_args(data: str | None) -> tuple[int, int] | None:
     return generation_id, version
 
 
-def _action_args(data: str | None) -> tuple[int, int, int] | None:
+def _action_args(data: str | None) -> tuple[int, int, str] | None:
     parts = (data or "").split(":")
     if len(parts) != 5 or parts[:2] != ["c", "a"]:
         return None
     generation_id = _positive_int(parts[2])
     version = _nonnegative_int(parts[3])
-    room_id = _nonnegative_int(parts[4])
-    if generation_id is None or version is None or room_id is None:
+    item_key = parts[4]
+    if (
+        generation_id is None
+        or version is None
+        or item_key not in _HAZARD_ITEM_KEYS
+    ):
         return None
-    return generation_id, version, room_id
+    return generation_id, version, item_key
+
+
+def _retreat_args(data: str | None) -> tuple[int, int] | None:
+    parts = (data or "").split(":")
+    if len(parts) != 4 or parts[:2] != ["c", "ar"]:
+        return None
+    generation_id = _positive_int(parts[2])
+    version = _nonnegative_int(parts[3])
+    if generation_id is None or version is None:
+        return None
+    return generation_id, version
 
 
 def _subscribe_args(data: str | None) -> tuple[int, str] | None:
@@ -203,18 +252,6 @@ def _hazard_description(kind: str | None) -> str:
     return "Комната встречает тебя работающей ловушкой и выталкивает обратно."
 
 
-def _hazard_action(
-    kind: str | None, item_key: str | None, consume_qty: int
-) -> str:
-    if kind:
-        try:
-            return cube_content.hazard_text(kind).action
-        except KeyError:
-            pass
-    suffix = " (−1)" if consume_qty else ""
-    return f"Обезвредить с помощью {_item_label(item_key)}{suffix}"
-
-
 def _hazard_result(kind: str | None, field: str, fallback: str) -> str:
     if kind:
         try:
@@ -228,12 +265,9 @@ def _effect_notice(kind: str | None, effect_arg: str | None = None) -> str | Non
     if not kind:
         return None
     try:
-        notice = cube_content.effect_text(kind).notice
+        return cube_content.effect_notice(kind, effect_arg)
     except KeyError:
         return None
-    if kind in {"vector", "tunnel"} and effect_arg:
-        return f"{notice} Цель: комната {effect_arg}."
-    return notice
 
 
 def _item_label(item_key: str | None) -> str:
@@ -282,52 +316,107 @@ def _known_directions(view) -> list[str]:
     return lines
 
 
-def _room_keyboard(view, tg_id: int, *, observe: bool = False):
-    if observe:
-        rows = [
-            [_direction_button(view, "n", observe=True)],
-            [
-                _direction_button(view, "w", observe=True),
-                InlineKeyboardButton(
-                    text="↩️ В комнату",
-                    callback_data=_callback_data(f"c:v:{view.generation_id}"),
-                ),
-                _direction_button(view, "e", observe=True),
-            ],
-            [_direction_button(view, "s", observe=True)],
-        ]
-    else:
-        rows = [
-            [_direction_button(view, "n")],
-            [
-                _direction_button(view, "w"),
-                InlineKeyboardButton(
-                    text="👁 Осмотреть",
-                    callback_data=_callback_data(
-                        f"c:o:{view.generation_id}:{view.run_version}"
-                    ),
-                ),
-                _direction_button(view, "e"),
-            ],
-            [_direction_button(view, "s")],
-        ]
+def _roommates_line(view) -> str | None:
+    roommates = tuple(getattr(view, "roommates", ()))
+    if not roommates:
+        return None
+    shown = ", ".join(html.escape(player.nick) for player in roommates[:3])
+    hidden = len(roommates) - 3
+    suffix = f" и ещё {hidden}" if hidden > 0 else ""
+    return f"👥 Рядом: <b>{shown}</b>{suffix}"
 
-    if not observe and view.pending_hazard_room_id is not None:
-        action = _hazard_action(
-            view.pending_hazard_kind,
-            view.pending_required_item_key,
-            int(view.pending_consume_qty or 0),
-        )
-        rows.append([
+
+def _available_hazard_items(
+    inventory: dict[str, int] | None,
+    *,
+    layout_version: int = 1,
+) -> list[str]:
+    quantities = inventory or {}
+    return [
+        key
+        for key in layout_item_keys(layout_version)
+        if quantities.get(key, 0) > 0
+    ]
+
+
+def _room_screen_key(view, *, observe: bool) -> str:
+    if view.pending_hazard_room_id is not None:
+        return _SCREEN_HAZARD_ITEMS
+    return _SCREEN_OBSERVE if observe else _SCREEN_ROOM
+
+
+def _hazard_item_rows(view, _tg_id: int, inventory: dict[str, int] | None):
+    quantities = inventory or {}
+    buttons = []
+    for item_key in _available_hazard_items(
+        quantities, layout_version=getattr(view, "layout_version", 1)
+    ):
+        qty = quantities[item_key]
+        qty_label = f" ×{qty}" if qty > 1 else ""
+        item_use = cube_item_use(item_key)
+        consume_label = " · −1" if item_use.is_consumable else " · ⚠️"
+        buttons.append(InlineKeyboardButton(
+            text=f"{_item_label(item_key)}{qty_label}{consume_label}",
+            callback_data=_callback_data(
+                f"c:a:{view.generation_id}:{view.run_version}:{item_key}"
+            ),
+        ))
+    rows = [buttons[index:index + 2] for index in range(0, len(buttons), 2)]
+    rows.append([InlineKeyboardButton(
+        text="↩️ Отступить",
+        callback_data=_callback_data(f"c:ar:{view.generation_id}:{view.run_version}"),
+    )])
+    return rows
+
+
+def _observe_rows(view, _tg_id: int, _inventory: dict[str, int] | None):
+    return [
+        [_direction_button(view, "n", observe=True)],
+        [
+            _direction_button(view, "w", observe=True),
             InlineKeyboardButton(
-                text=action,
+                text="↩️ В комнату",
+                callback_data=_callback_data(f"c:v:{view.generation_id}"),
+            ),
+            _direction_button(view, "e", observe=True),
+        ],
+        [_direction_button(view, "s", observe=True)],
+    ]
+
+
+def _navigation_rows(view, _tg_id: int, _inventory: dict[str, int] | None):
+    return [
+        [_direction_button(view, "n")],
+        [
+            _direction_button(view, "w"),
+            InlineKeyboardButton(
+                text="👁 Осмотреть",
                 callback_data=_callback_data(
-                    "c:a:"
-                    f"{view.generation_id}:{view.run_version}:"
-                    f"{view.pending_hazard_room_id}"
+                    f"c:o:{view.generation_id}:{view.run_version}"
                 ),
-            )
-        ])
+            ),
+            _direction_button(view, "e"),
+        ],
+        [_direction_button(view, "s")],
+    ]
+
+
+_SCREEN_ROW_BUILDERS = {
+    _SCREEN_ROOM: _navigation_rows,
+    _SCREEN_OBSERVE: _observe_rows,
+    _SCREEN_HAZARD_ITEMS: _hazard_item_rows,
+}
+
+
+def _room_keyboard(
+    view,
+    tg_id: int,
+    *,
+    observe: bool = False,
+    inventory: dict[str, int] | None = None,
+):
+    screen = _room_screen_key(view, observe=observe)
+    rows = _SCREEN_ROW_BUILDERS[screen](view, tg_id, inventory)
 
     rows.extend([
         [InlineKeyboardButton(
@@ -342,7 +431,12 @@ def _room_keyboard(view, tg_id: int, *, observe: bool = False):
     return _kb(rows)
 
 
-def _room_text(view, *, observe: bool = False) -> str:
+def _room_text(
+    view,
+    *,
+    observe: bool = False,
+    inventory: dict[str, int] | None = None,
+) -> str:
     room_code = view.room_code or "???"
     description = _room_description(view.room_description_key)
     if view.room_hazard_kind:
@@ -361,7 +455,11 @@ def _room_text(view, *, observe: bool = False) -> str:
         f"⏳ {_duration(deadline)} · 👥 {view.participant_count} · "
         f"🏆 {view.prize_amount} Z"
     )
-    lines.append(f"Исследовано: {view.explored_count}/16")
+    lines.append(f"Лично исследовано: {view.explored_count}")
+    roommates = _roommates_line(view)
+    if roommates:
+        lines.append(roommates)
+    lines.append("🟥 опасная · ⬜ нейтральная · 🟩 полезная")
 
     if view.generation_status == "lobby" and view.lobby_closes_at:
         lines.append(f"Набор открыт ещё {_duration(view.lobby_closes_at)}")
@@ -371,12 +469,28 @@ def _room_text(view, *, observe: bool = False) -> str:
         lines.extend(["", "<b>Известные направления:</b>", *known])
 
     if view.pending_hazard_room_id is not None:
+        available = _available_hazard_items(
+            inventory, layout_version=getattr(view, "layout_version", 1)
+        )
         lines.extend([
             "",
-            "⚠️ <b>Ловушка в соседней комнате</b>",
+            "⚠️ <b>Ловушка перекрыла проход</b>",
             _hazard_description(view.pending_hazard_kind),
-            f"Нужен предмет: <b>{_item_label(view.pending_required_item_key)}</b>.",
+            "",
+            "🎒 <b>Чем обезвреживаем?</b>",
         ])
+        if available:
+            lines.extend([
+                "Выбери предмет из инвентаря. Ошибёшься — Куб выплюнет тебя "
+                f"обратно в комнату {room_code}.",
+                "−1 — расходник тратится при попытке. ⚠️ — инструмент "
+                "сломается только при ошибке.",
+            ])
+        else:
+            lines.append(
+                "Из знакомых Кубу предметов в инвентаре пусто. Остаётся отступить "
+                "и вернуться с реквизитом."
+            )
 
     if view.room_hazard_resolved:
         resolver = html.escape(view.room_resolved_by_nick or "другой участник")
@@ -385,7 +499,7 @@ def _room_text(view, *, observe: bool = False) -> str:
             f"✅ Ловушку обезвредил <b>{resolver}</b>. Проход открыт для всех.",
         ])
 
-    if observe:
+    if observe and view.pending_hazard_room_id is None:
         lines.extend(["", "👁 Выбери направление для осмотра."])
     return "\n".join(lines)[:1024]
 
@@ -476,8 +590,10 @@ async def _render_current(cb: CallbackQuery, *, observe: bool = False) -> None:
     tg_id = cb.from_user.id
     view = await storage.get_cube_view(tg_id)
     if view is None:
-        await show_screen(
+        await show_photo_menu(
             cb.message,
+            _GAMES_PHOTO,
+            _GAMES_PHOTO_META,
             "🧊 Куб гудит за стеной, но вход пока не собран. Обнови экран.",
             _kb([
                 [InlineKeyboardButton(text="🔄 Обновить", callback_data="cube:view")],
@@ -489,13 +605,48 @@ async def _render_current(cb: CallbackQuery, *, observe: bool = False) -> None:
         )
         return
     if view.run_status == "active" and view.current_room_id is not None:
-        await show_screen(
+        inventory = (
+            await storage.get_inventory(tg_id)
+            if view.pending_hazard_room_id is not None
+            else None
+        )
+        caption = _room_text(view, observe=observe, inventory=inventory)
+        keyboard = _room_keyboard(
+            view, tg_id, observe=observe, inventory=inventory
+        )
+        try:
+            png = await asyncio.to_thread(render_map_png, _map_snapshot(view))
+        except Exception as exc:
+            log.exception("Куб: не удалось нарисовать личную карту: %s", exc)
+        else:
+            await show_dynamic_photo(
+                cb.message,
+                png,
+                (
+                    f"cube-map-{view.generation_id}-{view.run_id}-"
+                    f"{view.run_version}.png"
+                ),
+                caption,
+                keyboard,
+            )
+            return
+        # Не оставляем под новыми кнопками старую карту: при сбое Pillow
+        # возвращаем безопасный статический фон мини-игр.
+        await show_photo_menu(
             cb.message,
-            _room_text(view, observe=observe),
-            _room_keyboard(view, tg_id, observe=observe),
+            _GAMES_PHOTO,
+            _GAMES_PHOTO_META,
+            caption,
+            keyboard,
         )
         return
-    await show_screen(cb.message, _lobby_text(view), _lobby_keyboard(view, tg_id))
+    await show_photo_menu(
+        cb.message,
+        _GAMES_PHOTO,
+        _GAMES_PHOTO_META,
+        _lobby_text(view),
+        _lobby_keyboard(view, tg_id),
+    )
 
 
 async def _operation_failed(cb: CallbackQuery, operation: str, exc: Exception) -> None:
@@ -696,7 +847,10 @@ async def cube_move(cb: CallbackQuery):
         ),
         "won": (f"Приз найден! Тебе начислено {result.prize_amount} Z 🏆", True),
         "wall": ("Здесь глухая панель.", True),
-        "hazard": ("Ловушка отбросила тебя назад. Теперь она раскрыта для всех.", True),
+        "hazard": (
+            "Ловушка захлопнулась. Выбери предмет — правильный Куб не подскажет.",
+            True,
+        ),
         "bounced": (
             _effect_notice(result.effect_kind, result.effect_arg)
             or "Пространство схлопнулось и выбросило тебя обратно.",
@@ -720,38 +874,75 @@ async def cube_action(cb: CallbackQuery):
         return await cb.answer("Кнопка действия повреждена.", show_alert=True)
     if not await _ensure_cube_private(cb):
         return
-    generation_id, version, room_id = args
+    generation_id, version, selected_item_key = args
     try:
         result = await storage.resolve_cube_hazard_and_enter(
             generation_id,
             cb.from_user.id,
             version,
-            room_id,
+            selected_item_key,
             _next_spec(),
         )
     except Exception as exc:
         return await _operation_failed(cb, "hazard action", exc)
-    item = _item_label(result.required_item_key)
+    item = _item_label(selected_item_key)
     success = _hazard_result(
         getattr(result, "hazard_kind", None),
         "success",
         f"{item} сработал. Проход открыт для всех!",
     )
-    missing = _hazard_result(
-        getattr(result, "hazard_kind", None),
-        "missing",
-        f"Нужен предмет: {item}.",
-    )
+    try:
+        wrong = cube_content.wrong_hazard_item(
+            result.hazard_kind or "",
+            item,
+            item_key=selected_item_key,
+        )
+    except KeyError:
+        wrong = f"{item} не сработал. Куб выплюнул тебя обратно."
     messages = {
         "resolved_and_moved": (success, False),
         "already_resolved": ("Ловушку уже отключил другой участник.", True),
-        "missing_item": (missing, True),
+        "missing_item": (cube_content.missing_selected_item(item), True),
+        "wrong_item": (wrong, True),
         "stale": ("Эта кнопка осталась от прошлого хода.", True),
         "closed": ("Куб уже перестроился.", True),
         "no_run": ("Сначала войди в Куб.", True),
-        "invalid": ("Из этой комнаты ловушку не достать.", True),
+        "invalid": ("Этот выбор предмета больше не действует.", True),
     }
     message, alert = messages.get(result.status, ("Ловушка не отреагировала.", True))
+    if result.status == "closed":
+        message = await _closed_generation_notice(generation_id, message)
+    await cb.answer(message, show_alert=alert)
+    await _render_current(cb)
+
+
+@router.callback_query(F.data.startswith("c:ar:"))
+async def cube_hazard_retreat(cb: CallbackQuery):
+    args = _retreat_args(cb.data)
+    if args is None:
+        return await cb.answer("Кнопка отступления повреждена.", show_alert=True)
+    if not await _ensure_cube_private(cb):
+        return
+    generation_id, version = args
+    try:
+        result = await storage.retreat_cube_hazard(
+            generation_id,
+            cb.from_user.id,
+            version,
+            _next_spec(),
+        )
+    except Exception as exc:
+        return await _operation_failed(cb, "hazard retreat", exc)
+    messages = {
+        "retreated": ("Отступаем. Достоинство пока при тебе.", False),
+        "stale": ("Ты уже успел сделать что-то другое.", True),
+        "closed": ("Куб уже перестроился.", True),
+        "no_run": ("Сначала войди в Куб.", True),
+        "invalid": ("Отступать уже неоткуда.", True),
+    }
+    message, alert = messages.get(
+        result.status, ("Куб не понял манёвр.", True)
+    )
     if result.status == "closed":
         message = await _closed_generation_notice(generation_id, message)
     await cb.answer(message, show_alert=alert)
