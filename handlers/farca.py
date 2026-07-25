@@ -8,9 +8,12 @@ from db import storage
 from game.items import ITEMS, blackmarket_items
 from utils.guards import ensure_owner, with_owner
 from utils.notify import announce
-from utils.photo import show_text_menu
+from utils.photo import show_photo_menu
 
 router = Router()
+
+FARCA_PHOTO = "static/farca_shadow.png"
+FARCA_PHOTO_META = "farca_shadow_photo_id"
 
 DESCR = {
     "lockpicks": "🗝 <b>Отмычки</b> — навсегда −5% к шансу провала кражи",
@@ -37,7 +40,13 @@ async def _render(message, owner: int) -> None:
             rows.append([InlineKeyboardButton(text=f"{it.emoji} {it.name} — {it.price} Z",
                                               callback_data=with_owner(f"farca:buy:{it.key}", owner))])
     rows.append([InlineKeyboardButton(text="⬅️ В меню", callback_data=with_owner("menu:main", owner))])
-    await show_text_menu(message, "\n".join(lines), _kb(rows))
+    await show_photo_menu(
+        message,
+        FARCA_PHOTO,
+        FARCA_PHOTO_META,
+        "\n".join(lines),
+        _kb(rows),
+    )
 
 
 @router.callback_query(F.data.startswith("menu:farca:"))
